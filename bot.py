@@ -14,7 +14,7 @@ tree = app_commands.CommandTree(client)
 
 WATCH_FILE = "watchlists.json"
 
-# ---------------- LOAD WATCHLISTS (PERSISTENT) ----------------
+# ---------------- PERSISTENT STORAGE ----------------
 def load_watchlists():
     try:
         with open(WATCH_FILE, "r") as f:
@@ -32,7 +32,7 @@ user_watchlists = load_watchlists()
 stocks = [
     "NVDA","AMD","INTC","TSM","AVGO","ASML","ARM",
     "AAPL","MSFT","GOOGL","META","AMZN","NFLX","TSLA",
-    "PLTR","SOFI","UPST","SNOW","CRWD","NET","DDOG","OKTA",
+    "PLTR","SOFI","UPST","SNOW","CRWD","NET","DDOG",
     "RIVN","LCID","NIO","XPEV","LI",
     "COIN","MSTR","RIOT","MARA","HOOD",
     "SQ","PYPL","AFRM",
@@ -43,14 +43,23 @@ stocks = [
     "ADBE","ORCL","CRM","IBM"
 ]
 
-# ---------------- CORE SCORING ENGINE ----------------
+# ---------------- SECTOR MAP ----------------
+sector_map = {
+    "NVDA":"AI","AMD":"AI","INTC":"AI","PLTR":"AI","AI":"AI",
+    "TSLA":"EV","RIVN":"EV","LCID":"EV","NIO":"EV","XPEV":"EV","LI":"EV",
+    "JPM":"BANK","BAC":"BANK","WFC":"BANK","GS":"BANK","MS":"BANK",
+    "COIN":"CRYPTO","MSTR":"CRYPTO","RIOT":"CRYPTO","MARA":"CRYPTO",
+    "AAPL":"TECH","MSFT":"TECH","GOOGL":"TECH","META":"TECH","AMZN":"TECH"
+}
+
+# ---------------- SMART SCORE ENGINE ----------------
 def score_stock(ticker):
     try:
         data = yf.Ticker(ticker)
         hist = data.history(period="5d")
 
         if hist is None or hist.empty or len(hist) < 3:
-            return 5, "NO DATA", ["No data available"], 0
+            return 5, "NO DATA", [], 0
 
         close = hist["Close"].dropna()
         volume = hist["Volume"].dropna()
@@ -64,69 +73,58 @@ def score_stock(ticker):
         vol_now = volume.iloc[-1] if len(volume) else vol_avg
         vol_ratio = vol_now / vol_avg if vol_avg else 1
 
-        score = 5
+        # ---------------- INSTITUTIONAL SCORING ----------------
+        score = 5.0
         reasons = []
 
-        # momentum
+        # trend strength
         if change > 0.05:
-            score += 3
-            reasons.append("Strong bullish momentum")
+            score += 2.5
+            reasons.append("Strong bullish impulse")
         elif change > 0.02:
-            score += 2
-            reasons.append("Positive momentum building")
+            score += 1.5
+            reasons.append("Uptrend forming")
         elif change < -0.05:
             score -= 2
-            reasons.append("Strong sell pressure")
+            reasons.append("Heavy sell pressure")
         else:
-            reasons.append("Neutral movement")
+            reasons.append("Neutral trend")
 
-        # volume
-        if vol_ratio > 2:
-            score += 3
+        # volume confirmation
+        if vol_ratio > 2.5:
+            score += 2.5
             reasons.append("Institutional volume spike")
         elif vol_ratio > 1.5:
-            score += 2
-            reasons.append("Above average volume")
-        elif vol_ratio > 1.1:
-            score += 1
+            score += 1.5
+            reasons.append("Above average participation")
 
-        score = max(1, min(score, 10))
+        # stability penalty (removes fake spikes)
+        volatility = abs(change)
+        if volatility > 0.08:
+            score -= 1
+            reasons.append("High volatility risk")
+
+        score = max(1, min(int(round(score)), 10))
 
         if score >= 8:
-            label = "🚀 BREAKOUT"
+            label = "🚀 INSTITUTIONAL BREAKOUT"
         elif score >= 6:
-            label = "🔥 STRONG"
+            label = "🔥 ACCUMULATION"
         elif score >= 4:
-            label = "👀 WATCH"
+            label = "👀 NEUTRAL"
         else:
-            label = "❌ WEAK"
+            label = "❌ DISTRIBUTION"
 
         return score, label, reasons, change
 
     except:
-        return 5, "ERROR", ["Data fetch failed"], 0
+        return 5, "ERROR", ["Data failure"], 0
 
 
-# ---------------- ASYNC WRAPPER ----------------
+# ---------------- ASYNC SAFE ----------------
 async def safe_score(ticker):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, score_stock, ticker)
-
-
-# ---------------- EMBED BUILDER ----------------
-def build_embed(title, score, label, change, reasons):
-    embed = discord.Embed(title=title, color=0x00ff99)
-
-    embed.add_field(name="Score", value=f"{label} → {score}/10", inline=False)
-    embed.add_field(name="Change", value=f"{round(change*100,2)}%", inline=False)
-
-    embed.add_field(
-        name="Reasons",
-        value="\n".join([f"• {r}" for r in reasons]),
-        inline=False
-    )
-
-    return embed
 
 
 # ---------------- /RATE ----------------
@@ -137,18 +135,18 @@ async def rate(interaction: discord.Interaction, ticker: str):
 
     score, label, reasons, change = await safe_score(ticker.upper())
 
-    embed = build_embed(
-        f"{ticker.upper()} ANALYSIS",
-        score,
-        label,
-        change,
-        reasons
-    )
+    msg = f"📊 **{ticker.upper()} INSTITUTIONAL ANALYSIS**\n"
+    msg += f"{label} → {score}/10\n"
+    msg += f"Move: {round(change*100,2)}%\n\n"
 
-    await interaction.followup.send(embed=embed)
+    msg += "📌 Signals:\n"
+    for r in reasons:
+        msg += f"• {r}\n"
+
+    await interaction.followup.send(msg)
 
 
-# ---------------- /SCAN ----------------
+# ---------------- /SCAN (SMART FILTERED) ----------------
 @tree.command(name="scan")
 async def scan(interaction: discord.Interaction):
 
@@ -157,25 +155,46 @@ async def scan(interaction: discord.Interaction):
     results = []
 
     for s in stocks[:25]:
-        sc, label, _, change = await safe_score(s)
-        results.append((s, sc, label, change))
+        sc, label, _, chg = await safe_score(s)
+        results.append((s, sc, label, chg))
 
     results.sort(key=lambda x: x[1], reverse=True)
 
-    msg = ""
+    msg = "📊 **INSTITUTIONAL MARKET SCAN**\n\n"
+
     for r in results[:10]:
-        msg += f"**{r[0]}** → {r[1]}/10 {r[2]} ({round(r[3]*100,2)}%)\n"
+        msg += f"{r[0]} → {r[1]}/10 {r[2]} ({round(r[3]*100,2)}%)\n"
 
-    embed = discord.Embed(
-        title="📊 MARKET SCAN",
-        description=msg,
-        color=0x3498db
-    )
-
-    await interaction.followup.send(embed=embed)
+    await interaction.followup.send(msg)
 
 
-# ---------------- /BREAKOUTS ----------------
+# ---------------- /SECTOR HEATMAP ----------------
+@tree.command(name="sector")
+async def sector(interaction: discord.Interaction):
+
+    await interaction.response.defer()
+
+    heat = {}
+
+    for s in stocks[:25]:
+        sc, _, _, _ = await safe_score(s)
+        sec = sector_map.get(s, "OTHER")
+
+        if sec not in heat:
+            heat[sec] = []
+
+        heat[sec].append(sc)
+
+    msg = "📊 **SECTOR HEATMAP**\n\n"
+
+    for sec, scores in heat.items():
+        avg = sum(scores) / len(scores)
+        msg += f"{sec}: {round(avg,1)}/10\n"
+
+    await interaction.followup.send(msg)
+
+
+# ---------------- /BREAKOUTS (FILTERED) ----------------
 @tree.command(name="breakouts")
 async def breakouts(interaction: discord.Interaction):
 
@@ -185,24 +204,21 @@ async def breakouts(interaction: discord.Interaction):
 
     for s in stocks[:25]:
         sc, label, _, _ = await safe_score(s)
-        if sc >= 8:
+        if sc >= 9:
             results.append((s, sc))
 
     if not results:
-        await interaction.followup.send("No breakouts right now.")
+        await interaction.followup.send("No institutional breakouts detected.")
         return
 
     results.sort(key=lambda x: x[1], reverse=True)
 
-    msg = "\n".join([f"🚀 {r[0]} → {r[1]}/10" for r in results])
+    msg = "🚨 **INSTITUTIONAL BREAKOUTS**\n\n"
 
-    embed = discord.Embed(
-        title="🚨 BREAKOUT ALERTS",
-        description=msg,
-        color=0xff0000
-    )
+    for r in results:
+        msg += f"{r[0]} → {r[1]}/10\n"
 
-    await interaction.followup.send(embed=embed)
+    await interaction.followup.send(msg)
 
 
 # ---------------- /WATCH ----------------
@@ -217,72 +233,28 @@ async def watch(interaction: discord.Interaction, ticker: str):
     user_watchlists[uid].append(ticker.upper())
     save_watchlists(user_watchlists)
 
-    await interaction.response.send_message(
-        f"✅ Added {ticker.upper()} to your watchlist."
-    )
+    await interaction.response.send_message(f"Added {ticker.upper()} to watchlist")
 
 
-# ---------------- /COMPARE ----------------
-@tree.command(name="compare")
-async def compare(interaction: discord.Interaction, stock1: str, stock2: str):
+# ---------------- /PORT ----------------
+@tree.command(name="port")
+async def port(interaction: discord.Interaction):
 
-    await interaction.response.defer()
+    uid = str(interaction.user.id)
 
-    s1, l1, r1, c1 = await safe_score(stock1.upper())
-    s2, l2, r2, c2 = await safe_score(stock2.upper())
+    if uid not in user_watchlists or not user_watchlists[uid]:
+        await interaction.response.send_message("No watchlist found")
+        return
 
-    winner = stock1.upper() if s1 > s2 else stock2.upper() if s2 > s1 else "Tie"
+    tickers = user_watchlists[uid][:10]
 
-    msg = f"{stock1.upper()} → {s1}/10\n{stock2.upper()} → {s2}/10\n\n🏆 {winner}"
+    msg = "📈 YOUR PORTFOLIO\n\n"
 
-    embed = discord.Embed(
-        title="⚔️ STOCK COMPARISON",
-        description=msg,
-        color=0x9b59b6
-    )
+    for t in tickers:
+        sc, label, _, _ = await safe_score(t)
+        msg += f"{t} → {sc}/10 {label}\n"
 
-    await interaction.followup.send(embed=embed)
-
-
-# ---------------- LIVE ALERT LOOP ----------------
-ALERT_CHANNEL_ID = None  # PUT YOUR CHANNEL ID HERE
-
-async def alert_loop():
-    await client.wait_until_ready()
-
-    while not client.is_closed():
-
-        try:
-            alerts = []
-
-            for s in stocks[:20]:
-                sc, label, _, _ = await safe_score(s)
-                if sc >= 9:
-                    alerts.append((s, sc))
-
-            if ALERT_CHANNEL_ID and alerts:
-                channel = client.get_channel(ALERT_CHANNEL_ID)
-
-                if channel:
-                    msg = "🚨 **LIVE BREAKOUT ALERT**\n\n"
-                    for a in alerts:
-                        msg += f"{a[0]} → {a[1]}/10\n"
-
-                    await channel.send(msg)
-
-        except:
-            pass
-
-        await asyncio.sleep(300)
-
-
-# ---------------- KEEP ALIVE ----------------
-async def heartbeat():
-    await client.wait_until_ready()
-
-    while not client.is_closed():
-        print("heartbeat:", time.ctime())
-        await asyncio.sleep(60)
+    await interaction.response.send_message(msg)
 
 
 # ---------------- WAKE ----------------
@@ -293,25 +265,23 @@ async def wake(interaction: discord.Interaction):
 
     try:
         await tree.sync()
-        status = "Synced successfully"
+        msg = "Synced successfully"
     except Exception as e:
-        status = str(e)
+        msg = str(e)
 
-    await interaction.followup.send(f"🟢 WAKE OK\n{status}")
+    await interaction.followup.send(f"🟢 SYSTEM ONLINE\n{msg}")
 
 
 # ---------------- READY ----------------
 @client.event
 async def on_ready():
     await tree.sync()
-    print("PRO TRADING SYSTEM V4 ONLINE")
+    print("INSTITUTIONAL V5 ONLINE")
 
 
 # ---------------- RUN ----------------
 async def main():
     async with client:
-        client.loop.create_task(alert_loop())
-        client.loop.create_task(heartbeat())
         await client.start(TOKEN)
 
 asyncio.run(main())
