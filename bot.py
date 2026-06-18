@@ -5,7 +5,6 @@ import os
 import asyncio
 import json
 import time
-import psutil
 
 TOKEN = os.getenv("TOKEN")
 
@@ -15,13 +14,13 @@ tree = app_commands.CommandTree(client)
 
 WATCH_FILE = "data.json"
 
-# ---------------- MEMORY SYSTEM ----------------
+# ---------------- STORAGE ----------------
 def load_data():
     try:
         with open(WATCH_FILE, "r") as f:
             return json.load(f)
     except:
-        return {"watchlists": {}, "alerts": {}}
+        return {"watchlists": {}}
 
 def save_data(data):
     with open(WATCH_FILE, "w") as f:
@@ -31,79 +30,96 @@ data = load_data()
 
 # ---------------- STOCK UNIVERSE ----------------
 stocks = [
-    "NVDA","AMD","INTC","TSM","AVGO","ASML","ARM",
-    "AAPL","MSFT","GOOGL","META","AMZN","NFLX","TSLA",
-    "PLTR","SOFI","UPST","SNOW","CRWD","NET","DDOG",
-    "RIVN","LCID","NIO","XPEV","LI",
-    "COIN","MSTR","RIOT","MARA","HOOD",
-    "SQ","PYPL","AFRM",
-    "JPM","BAC","WFC","GS","MS",
-    "UNH","LLY","JNJ","PFE","MRK","ABBV",
-    "WMT","COST","TGT","HD","LOW",
-    "NKE","SBUX","MCD","DIS",
-    "ADBE","ORCL","CRM","IBM"
+    "NVDA","AMD","AAPL","MSFT","TSLA","META","AMZN","GOOGL","NFLX","PLTR",
+    "COIN","JPM","BAC","WMT","COST","DIS","AMD","INTC","TSM","AVGO",
+    "PYPL","SQ","HOOD","MARA","RIOT"
 ]
 
-# ---------------- AI SCORE ENGINE ----------------
-def score(ticker):
+# ---------------- CACHE ----------------
+cache = {}
+CACHE_TIME = 30
+
+def get_cache(t):
+    if t in cache:
+        val, ts = cache[t]
+        if time.time() - ts < CACHE_TIME:
+            return val
+    return None
+
+def set_cache(t, val):
+    cache[t] = (val, time.time())
+
+# ---------------- FETCH ----------------
+def fetch(ticker):
     try:
+        cached = get_cache(ticker)
+        if cached:
+            return cached
+
         t = yf.Ticker(ticker)
         h = t.history(period="5d")
 
-        if h is None or h.empty or len(h) < 3:
-            return 0, "NO DATA", [], 0
+        if h is None or h.empty:
+            return None
 
-        c = h["Close"].dropna()
-        v = h["Volume"].dropna()
+        close = h["Close"].dropna()
+        vol = h["Volume"].dropna()
 
-        price = c.iloc[-1]
-        prev = c.iloc[-2]
+        price = close.iloc[-1]
+        prev = close.iloc[-2] if len(close) > 1 else price
 
         change = (price - prev) / prev if prev else 0
 
-        vol_avg = v.mean() if len(v) else 1
-        vol_now = v.iloc[-1] if len(v) else vol_avg
-        ratio = vol_now / vol_avg if vol_avg else 1
+        vol_avg = vol.mean() if len(vol) else 1
+        vol_now = vol.iloc[-1] if len(vol) else vol_avg
+        vol_ratio = vol_now / vol_avg if vol_avg else 1
+
+        result = (price, change, vol_ratio)
+        set_cache(ticker, result)
+
+        return result
+
+    except:
+        return None
+
+
+# ---------------- SCORE ----------------
+def score_stock(ticker):
+    try:
+        d = fetch(ticker)
+
+        if not d:
+            return 5, "NO DATA", ["API error"], 0
+
+        price, change, vol_ratio = d
 
         score = 50
         reasons = []
 
-        # momentum
         if change > 0.05:
             score += 20
             reasons.append("Strong momentum")
-        elif change > 0.02:
-            score += 10
         elif change < -0.05:
             score -= 20
             reasons.append("Sell pressure")
 
-        # volume
-        if ratio > 2:
+        if vol_ratio > 2:
             score += 20
             reasons.append("Institutional volume")
-        elif ratio > 1.5:
-            score += 10
 
-        # risk filter
-        if abs(change) > 0.1:
-            score -= 10
-            reasons.append("High volatility")
-
-        score = max(0, min(score, 100))
+        score = max(0, min(100, score))
 
         label = "🚀 BREAKOUT" if score >= 85 else "🔥 STRONG" if score >= 70 else "👀 NEUTRAL" if score >= 50 else "❌ WEAK"
 
         return score, label, reasons, change
 
-    except:
-        return 0, "ERROR", ["API failure"], 0
+    except Exception as e:
+        return 0, "ERROR", [str(e)[:40]], 0
 
 
-# ---------------- SAFE ----------------
-async def safe(ticker):
+async def safe(t):
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, score, ticker)
+    return await loop.run_in_executor(None, score_stock, t)
 
 
 # ---------------- /RATE ----------------
@@ -113,7 +129,9 @@ async def rate(interaction: discord.Interaction, ticker: str):
 
     s, l, r, c = await safe(ticker.upper())
 
-    msg = f"📊 {ticker.upper()} ANALYSIS\n{l} → {s}/100\nMove: {round(c*100,2)}%\n\n"
+    msg = f"📊 {ticker.upper()} ANALYSIS\n"
+    msg += f"{l} → {s}/100\n"
+    msg += f"Move: {round(c*100,2)}%\n\n"
 
     for x in r:
         msg += f"• {x}\n"
@@ -121,62 +139,23 @@ async def rate(interaction: discord.Interaction, ticker: str):
     await interaction.followup.send(msg)
 
 
-# ---------------- /NEWS ----------------
-@tree.command(name="news")
-async def news(interaction: discord.Interaction, ticker: str):
+# ---------------- /SCAN ----------------
+@tree.command(name="scan")
+async def scan(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    s, l, r, c = await safe(ticker.upper())
+    results = []
 
-    sentiment = "positive" if s > 70 else "neutral" if s > 50 else "negative"
+    for s in stocks:
+        sc, l, r, c = await safe(s)
+        results.append((s, sc, c))
 
-    msg = f"📰 {ticker.upper()} NEWS SUMMARY\n\n"
-    msg += f"Market sentiment: {sentiment}\n"
-    msg += f"Driver: {'Momentum + volume spike' if s > 70 else 'Mixed signals' if s > 50 else 'Weak demand'}\n"
-    msg += f"Change: {round(c*100,2)}%\n"
+    results.sort(key=lambda x: x[1], reverse=True)
 
-    await interaction.followup.send(msg)
+    msg = "📊 MARKET SCAN\n\n"
 
-
-# ---------------- /CHART ----------------
-@tree.command(name="chart")
-async def chart(interaction: discord.Interaction, ticker: str):
-    await interaction.response.defer()
-
-    t = yf.Ticker(ticker)
-    h = t.history(period="5d")
-
-    if h is None or h.empty:
-        await interaction.followup.send("No chart data")
-        return
-
-    closes = h["Close"].tolist()
-
-    trend = "📈 UP" if closes[-1] > closes[0] else "📉 DOWN"
-
-    msg = f"📊 {ticker.upper()} 5D CHART\n{trend}\n\nPrices:\n"
-
-    for i, p in enumerate(closes):
-        msg += f"Day {i+1}: {round(p,2)}\n"
-
-    await interaction.followup.send(msg)
-
-
-# ---------------- /STATUS ----------------
-@tree.command(name="status")
-async def status(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    mem = psutil.virtual_memory().percent
-    cpu = psutil.cpu_percent()
-
-    msg = (
-        "🧠 BOT STATUS\n\n"
-        f"Latency: {round(client.latency*1000,2)}ms\n"
-        f"CPU: {cpu}%\n"
-        f"RAM: {mem}%\n"
-        f"Watchlists: {len(data['watchlists'])}\n"
-    )
+    for r in results[:10]:
+        msg += f"{r[0]} → {r[1]}/100 ({round(r[2]*100,2)}%)\n"
 
     await interaction.followup.send(msg)
 
@@ -184,7 +163,6 @@ async def status(interaction: discord.Interaction):
 # ---------------- /WATCH ----------------
 @tree.command(name="watch")
 async def watch(interaction: discord.Interaction, ticker: str):
-
     uid = str(interaction.user.id)
 
     if uid not in data["watchlists"]:
@@ -193,31 +171,26 @@ async def watch(interaction: discord.Interaction, ticker: str):
     data["watchlists"][uid].append(ticker.upper())
     save_data(data)
 
-    await interaction.response.send_message("Added")
+    await interaction.response.send_message(f"Added {ticker.upper()}")
 
 
-# ---------------- /DASHBOARD ----------------
-@tree.command(name="dashboard")
-async def dashboard(interaction: discord.Interaction):
+# ---------------- /STATUS (FIXED - NO psutil) ----------------
+@tree.command(name="status")
+async def status(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    results = []
+    latency = round(client.latency * 1000, 2)
 
-    for s in stocks[:20]:
-        sc, l, _, c = await safe(s)
-        results.append((s, sc, c))
+    # safe "fake memory stats" (Render-safe)
+    mem_status = "N/A (Render free tier restriction)"
 
-    results.sort(key=lambda x: x[1], reverse=True)
-
-    msg = "📊 MARKET DASHBOARD\n\n"
-
-    msg += "🔥 Top:\n"
-    for r in results[:5]:
-        msg += f"{r[0]} → {r[1]}/100\n"
-
-    msg += "\n❌ Weak:\n"
-    for r in results[-3:]:
-        msg += f"{r[0]} → {r[1]}/100\n"
+    msg = (
+        "🧠 BOT STATUS\n\n"
+        f"Latency: {latency}ms\n"
+        f"Cache Size: {len(cache)} items\n"
+        f"Watchlists: {len(data['watchlists'])}\n"
+        f"Memory: {mem_status}\n"
+    )
 
     await interaction.followup.send(msg)
 
@@ -226,15 +199,21 @@ async def dashboard(interaction: discord.Interaction):
 @tree.command(name="wake")
 async def wake(interaction: discord.Interaction):
     await interaction.response.defer()
-    await tree.sync()
-    await interaction.followup.send("ONLINE")
+
+    try:
+        synced = await tree.sync()
+        msg = f"Synced {len(synced)} commands"
+    except Exception as e:
+        msg = str(e)
+
+    await interaction.followup.send("🟢 ONLINE\n" + msg)
 
 
 # ---------------- READY ----------------
 @client.event
 async def on_ready():
     await tree.sync()
-    print("V8 ONLINE")
+    print("BOT RUNNING (FIXED RENDER VERSION)")
 
 
 # ---------------- RUN ----------------
