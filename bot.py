@@ -9,52 +9,50 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# ---------------- EXPANDED STOCK LIST (~60) ----------------
+# ---------------- STOCK LIST ----------------
 stocks = [
-    # Mega caps
-    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA",
-
-    # Chips / AI
-    "AMD","INTC","AVGO","QCOM","MU","ARM","ASML","TXN","ADI","AMAT","LRCX",
-
-    # EV / Growth
-    "RIVN","LCID","NIO","F","GM","UBER","LYFT",
-
-    # Finance
-    "JPM","BAC","WFC","GS","MS","C","SCHW","BLK",
-
-    # Healthcare
-    "UNH","LLY","JNJ","PFE","MRK","ABBV","BMY",
-
-    # Retail / Consumer
-    "WMT","COST","TGT","HD","LOW","NKE","SBUX",
-
-    # Tech growth / software
-    "PLTR","SNOW","CRWD","NET","OKTA","DDOG","ADBE","ORCL",
-
-    # Crypto / trading
+    "NVDA","AMD","PLTR","TSLA","SOFI","AAPL",
+    "MSFT","GOOGL","META","AMZN","NFLX",
+    "AVGO","MU","QCOM","INTC",
+    "RIVN","LCID","NIO",
+    "JPM","BAC","WFC","GS","MS",
+    "UNH","LLY","JNJ","PFE","MRK",
+    "WMT","COST","TGT","HD","LOW",
+    "NKE","SBUX",
     "COIN","MSTR","RIOT","MARA","HOOD",
-
-    # Momentum extras
-    "SHOP","SQ","PYPL","ROKU","SPOT"
+    "SHOP","SQ","PYPL","ROKU","SPOT",
+    "CRWD","SNOW","NET","OKTA","DDOG",
+    "ADBE","ORCL"
 ]
 
-# ---------------- SCORE SYSTEM ----------------
+# ---------------- SAFE SCORE SYSTEM ----------------
 def score(ticker):
     try:
         data = yf.Ticker(ticker)
         hist = data.history(period="6mo")
 
-        if hist.empty:
+        # safety checks (CRITICAL FIX)
+        if hist is None or hist.empty or len(hist) < 60:
             return 0
 
-        close = hist["Close"]
-        volume = hist["Volume"]
+        close = hist["Close"].dropna()
+        volume = hist["Volume"].dropna()
+
+        if len(close) < 20 or len(volume) < 20:
+            return 0
 
         price = close.iloc[-1]
-        sma50 = close.rolling(50).mean().iloc[-1]
 
-        vol_avg = volume.rolling(20).mean().iloc[-1]
+        sma50_series = close.rolling(50).mean().dropna()
+        if sma50_series.empty:
+            return 0
+        sma50 = sma50_series.iloc[-1]
+
+        vol_avg_series = volume.rolling(20).mean().dropna()
+        if vol_avg_series.empty:
+            return 0
+        vol_avg = vol_avg_series.iloc[-1]
+
         vol_now = volume.iloc[-1]
         vol_ratio = vol_now / vol_avg if vol_avg > 0 else 0
 
@@ -89,52 +87,29 @@ def score(ticker):
 async def rate(interaction: discord.Interaction, ticker: str):
     t = ticker.upper()
 
-    try:
-        data = yf.Ticker(t)
-        hist = data.history(period="6mo")
+    s = score(t)
 
-        close = hist["Close"]
-        volume = hist["Volume"]
+    if s >= 8:
+        label = "🚀 BREAKOUT"
+    elif s >= 6:
+        label = "🔥 STRONG"
+    elif s >= 4:
+        label = "👀 WATCH"
+    else:
+        label = "❌ WEAK"
 
-        price = close.iloc[-1]
-        sma50 = close.rolling(50).mean().iloc[-1]
-
-        vol_avg = volume.rolling(20).mean().iloc[-1]
-        vol_now = volume.iloc[-1]
-        vol_ratio = vol_now / vol_avg if vol_avg > 0 else 0
-
-        last_10_high = close.iloc[-10:].max()
-
-        s = score(t)
-
-        if s >= 8:
-            label = "🚀 BREAKOUT"
-        elif s >= 6:
-            label = "🔥 STRONG"
-        elif s >= 4:
-            label = "👀 WATCH"
-        else:
-            label = "❌ WEAK"
-
-        msg = f"{t} → {s}/10 ({label})\n\n"
-        msg += "WHY:\n"
-        msg += f"- Trend (SMA50): {'✔' if price > sma50 else '❌'}\n"
-        msg += f"- Momentum: {'✔' if price >= last_10_high else '❌'}\n"
-        msg += f"- Volume spike: {vol_ratio:.2f}x\n"
-
-        await interaction.response.send_message(msg)
-
-    except:
-        await interaction.response.send_message("Error checking stock.")
+    await interaction.response.send_message(f"{t} → {s}/10 ({label})")
 
 
 # ---------------- /SCAN ----------------
-@tree.command(name="scan", description="Scan top stocks")
+@tree.command(name="scan", description="Scan stocks")
 async def scan(interaction: discord.Interaction):
+
     results = [(s, score(s)) for s in stocks]
     results.sort(key=lambda x: x[1], reverse=True)
 
     msg = "📊 TOP STOCKS\n\n"
+
     for r in results[:7]:
         msg += f"{r[0]} → {r[1]}/10\n"
 
@@ -142,8 +117,9 @@ async def scan(interaction: discord.Interaction):
 
 
 # ---------------- /BREAKOUTS ----------------
-@tree.command(name="breakouts", description="Show only strong breakout stocks")
+@tree.command(name="breakouts", description="Only breakout stocks")
 async def breakouts(interaction: discord.Interaction):
+
     results = [(s, score(s)) for s in stocks]
     results = [r for r in results if r[1] >= 8]
     results.sort(key=lambda x: x[1], reverse=True)
@@ -152,7 +128,8 @@ async def breakouts(interaction: discord.Interaction):
         await interaction.response.send_message("No breakouts right now.")
         return
 
-    msg = "🚀 BREAKOUT STOCKS\n\n"
+    msg = "🚀 BREAKOUTS\n\n"
+
     for r in results:
         msg += f"{r[0]} → {r[1]}/10\n"
 
@@ -160,8 +137,9 @@ async def breakouts(interaction: discord.Interaction):
 
 
 # ---------------- /COMPARE ----------------
-@tree.command(name="compare", description="Compare two stocks")
+@tree.command(name="compare", description="Compare stocks")
 async def compare(interaction: discord.Interaction, stock1: str, stock2: str):
+
     s1 = stock1.upper()
     s2 = stock2.upper()
 
@@ -178,13 +156,14 @@ async def compare(interaction: discord.Interaction, stock1: str, stock2: str):
     await interaction.response.send_message(msg)
 
 
-# ---------------- /MOMENTUM ----------------
-@tree.command(name="momentum", description="Show fast moving stocks")
+# ---------------- MOMENTUM ----------------
+@tree.command(name="momentum", description="Fast movers")
 async def momentum(interaction: discord.Interaction):
+
     results = [(s, score(s)) for s in stocks]
     results.sort(key=lambda x: x[1], reverse=True)
 
-    msg = "⚡ MOMENTUM LEADERS\n\n"
+    msg = "⚡ MOMENTUM\n\n"
 
     for r in results[:5]:
         msg += f"{r[0]} → {r[1]}/10\n"
