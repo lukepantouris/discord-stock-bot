@@ -2,12 +2,9 @@ import discord
 from discord import app_commands
 import yfinance as yf
 import os
-import threading
-from flask import Flask
 
 TOKEN = os.getenv("TOKEN")
 
-# ---------------- DISCORD BOT ----------------
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
@@ -72,7 +69,6 @@ def score(ticker):
         return 0
 
 
-# ---------------- COMMANDS ----------------
 @tree.command(name="rate")
 async def rate(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
@@ -135,21 +131,5 @@ async def compare(interaction: discord.Interaction, stock1: str, stock2: str):
 async def on_ready():
     await tree.sync()
     print("Bot is running")
-
-
-# ---------------- WEB SERVER (RENDER FIX) ----------------
-app = Flask("")
-
-@app.route("/")
-def home():
-    return "OK"
-
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-
-
-# start web server thread
-threading.Thread(target=run_web).start()
 
 client.run(TOKEN)
