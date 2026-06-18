@@ -12,42 +12,42 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-WATCH_FILE = "data.json"
+DATA_FILE = "data.json"
 
-# ---------------- STORAGE ----------------
-def load_data():
+# ---------------- MEMORY ----------------
+def load():
     try:
-        with open(WATCH_FILE, "r") as f:
+        with open(DATA_FILE, "r") as f:
             return json.load(f)
     except:
         return {"watchlists": {}}
 
-def save_data(data):
-    with open(WATCH_FILE, "w") as f:
-        json.dump(data, f)
+def save(d):
+    with open(DATA_FILE, "w") as f:
+        json.dump(d, f)
 
-data = load_data()
+data = load()
 
 # ---------------- STOCK UNIVERSE ----------------
 stocks = [
     "NVDA","AMD","AAPL","MSFT","TSLA","META","AMZN","GOOGL","NFLX","PLTR",
-    "COIN","JPM","BAC","WMT","COST","DIS","AMD","INTC","TSM","AVGO",
-    "PYPL","SQ","HOOD","MARA","RIOT"
+    "COIN","JPM","BAC","WMT","COST","DIS","INTC","TSM","AVGO","PYPL",
+    "SQ","HOOD","MARA","RIOT","SOFI","NIO","RIVN","LCID","IBM","ORCL"
 ]
 
 # ---------------- CACHE ----------------
 cache = {}
-CACHE_TIME = 30
+CACHE_TIME = 25
 
 def get_cache(t):
     if t in cache:
-        val, ts = cache[t]
+        v, ts = cache[t]
         if time.time() - ts < CACHE_TIME:
-            return val
+            return v
     return None
 
-def set_cache(t, val):
-    cache[t] = (val, time.time())
+def set_cache(t, v):
+    cache[t] = (v, time.time())
 
 # ---------------- FETCH ----------------
 def fetch(ticker):
@@ -83,55 +83,49 @@ def fetch(ticker):
         return None
 
 
-# ---------------- SCORE ----------------
-def score_stock(ticker):
-    try:
-        d = fetch(ticker)
+# ---------------- SCORE ENGINE ----------------
+def score(ticker):
+    d = fetch(ticker)
 
-        if not d:
-            return 5, "NO DATA", ["API error"], 0
+    if not d:
+        return 5, "NO DATA", ["API issue"], 0
 
-        price, change, vol_ratio = d
+    price, change, vol_ratio = d
 
-        score = 50
-        reasons = []
+    s = 50
+    r = []
 
-        if change > 0.05:
-            score += 20
-            reasons.append("Strong momentum")
-        elif change < -0.05:
-            score -= 20
-            reasons.append("Sell pressure")
+    if change > 0.05:
+        s += 20
+        r.append("Strong momentum")
+    elif change < -0.05:
+        s -= 20
+        r.append("Sell pressure")
 
-        if vol_ratio > 2:
-            score += 20
-            reasons.append("Institutional volume")
+    if vol_ratio > 2:
+        s += 20
+        r.append("Institutional volume")
 
-        score = max(0, min(100, score))
+    s = max(0, min(100, s))
 
-        label = "🚀 BREAKOUT" if score >= 85 else "🔥 STRONG" if score >= 70 else "👀 NEUTRAL" if score >= 50 else "❌ WEAK"
+    label = "🚀 BREAKOUT" if s >= 85 else "🔥 STRONG" if s >= 70 else "👀 NEUTRAL" if s >= 50 else "❌ WEAK"
 
-        return score, label, reasons, change
-
-    except Exception as e:
-        return 0, "ERROR", [str(e)[:40]], 0
+    return s, label, r, change
 
 
 async def safe(t):
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, score_stock, t)
+    return await loop.run_in_executor(None, score, t)
 
 
-# ---------------- /RATE ----------------
+# ---------------- RATE ----------------
 @tree.command(name="rate")
 async def rate(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
 
     s, l, r, c = await safe(ticker.upper())
 
-    msg = f"📊 {ticker.upper()} ANALYSIS\n"
-    msg += f"{l} → {s}/100\n"
-    msg += f"Move: {round(c*100,2)}%\n\n"
+    msg = f"📊 {ticker.upper()} ANALYSIS\n{l} → {s}/100\nMove: {round(c*100,2)}%\n\n"
 
     for x in r:
         msg += f"• {x}\n"
@@ -139,28 +133,121 @@ async def rate(interaction: discord.Interaction, ticker: str):
     await interaction.followup.send(msg)
 
 
-# ---------------- /SCAN ----------------
+# ---------------- SCAN ----------------
 @tree.command(name="scan")
 async def scan(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    results = []
+    out = []
 
     for s in stocks:
         sc, l, r, c = await safe(s)
-        results.append((s, sc, c))
+        out.append((s, sc, c))
 
-    results.sort(key=lambda x: x[1], reverse=True)
+    out.sort(key=lambda x: x[1], reverse=True)
 
     msg = "📊 MARKET SCAN\n\n"
 
-    for r in results[:10]:
+    for r in out[:10]:
         msg += f"{r[0]} → {r[1]}/100 ({round(r[2]*100,2)}%)\n"
 
     await interaction.followup.send(msg)
 
 
-# ---------------- /WATCH ----------------
+# ---------------- BREAKOUTS (FIXED + ADDED BACK) ----------------
+@tree.command(name="breakouts")
+async def breakouts(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    found = []
+
+    for s in stocks:
+        sc, l, r, c = await safe(s)
+        if sc >= 85:
+            found.append((s, sc))
+
+    if not found:
+        await interaction.followup.send("No strong breakouts right now.")
+        return
+
+    found.sort(key=lambda x: x[1], reverse=True)
+
+    msg = "🚨 BREAKOUT WATCH\n\n"
+
+    for f in found:
+        msg += f"{f[0]} → {f[1]}/100\n"
+
+    await interaction.followup.send(msg)
+
+
+# ---------------- NEWS (ADDED BACK) ----------------
+@tree.command(name="news")
+async def news(interaction: discord.Interaction, ticker: str):
+    await interaction.response.defer()
+
+    s, l, r, c = await safe(ticker.upper())
+
+    sentiment = "bullish" if s > 70 else "neutral" if s > 50 else "bearish"
+
+    msg = f"📰 {ticker.upper()} NEWS SNAPSHOT\n\n"
+    msg += f"Sentiment: {sentiment}\n"
+    msg += f"Driver: {'Momentum + volume' if s > 70 else 'Mixed signals'}\n"
+    msg += f"Move: {round(c*100,2)}%\n"
+
+    await interaction.followup.send(msg)
+
+
+# ---------------- CHART (ADDED BACK) ----------------
+@tree.command(name="chart")
+async def chart(interaction: discord.Interaction, ticker: str):
+    await interaction.response.defer()
+
+    t = yf.Ticker(ticker)
+    h = t.history(period="5d")
+
+    if h is None or h.empty:
+        await interaction.followup.send("No chart data")
+        return
+
+    closes = h["Close"].tolist()
+
+    trend = "📈 UP" if closes[-1] > closes[0] else "📉 DOWN"
+
+    msg = f"📊 {ticker.upper()} CHART\n{trend}\n\n"
+
+    for i, p in enumerate(closes):
+        msg += f"Day {i+1}: {round(p,2)}\n"
+
+    await interaction.followup.send(msg)
+
+
+# ---------------- DASHBOARD (ADDED BACK) ----------------
+@tree.command(name="dashboard")
+async def dashboard(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    res = []
+
+    for s in stocks[:15]:
+        sc, l, r, c = await safe(s)
+        res.append((s, sc))
+
+    res.sort(key=lambda x: x[1], reverse=True)
+
+    msg = "📊 MARKET DASHBOARD\n\n"
+
+    msg += "🔥 Top Movers:\n"
+    for r in res[:5]:
+        msg += f"{r[0]} → {r[1]}/100\n"
+
+    msg += "\n❌ Weak:\n"
+    for r in res[-3:]:
+        msg += f"{r[0]} → {r[1]}/100\n"
+
+    await interaction.followup.send(msg)
+
+
+# ---------------- WATCH ----------------
 @tree.command(name="watch")
 async def watch(interaction: discord.Interaction, ticker: str):
     uid = str(interaction.user.id)
@@ -169,33 +256,27 @@ async def watch(interaction: discord.Interaction, ticker: str):
         data["watchlists"][uid] = []
 
     data["watchlists"][uid].append(ticker.upper())
-    save_data(data)
+    save(data)
 
     await interaction.response.send_message(f"Added {ticker.upper()}")
 
 
-# ---------------- /STATUS (FIXED - NO psutil) ----------------
+# ---------------- STATUS ----------------
 @tree.command(name="status")
 async def status(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    latency = round(client.latency * 1000, 2)
-
-    # safe "fake memory stats" (Render-safe)
-    mem_status = "N/A (Render free tier restriction)"
-
     msg = (
-        "🧠 BOT STATUS\n\n"
-        f"Latency: {latency}ms\n"
-        f"Cache Size: {len(cache)} items\n"
+        "🧠 SYSTEM STATUS\n\n"
+        f"Latency: {round(client.latency*1000,2)}ms\n"
+        f"Cache size: {len(cache)} items\n"
         f"Watchlists: {len(data['watchlists'])}\n"
-        f"Memory: {mem_status}\n"
     )
 
     await interaction.followup.send(msg)
 
 
-# ---------------- WAKE ----------------
+# ---------------- WAKE (FORCE SYNC FIX) ----------------
 @tree.command(name="wake")
 async def wake(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -212,8 +293,13 @@ async def wake(interaction: discord.Interaction):
 # ---------------- READY ----------------
 @client.event
 async def on_ready():
-    await tree.sync()
-    print("BOT RUNNING (FIXED RENDER VERSION)")
+    try:
+        synced = await tree.sync()
+        print(f"SYNCED {len(synced)} COMMANDS")
+    except Exception as e:
+        print("SYNC ERROR:", e)
+
+    print("BOT ONLINE (FULL V9 RESTORE)")
 
 
 # ---------------- RUN ----------------
