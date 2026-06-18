@@ -9,86 +9,102 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# ---------------- WATCHLIST ----------------
+# ---------------- WATCHLIST (expanded + similar stocks) ----------------
 stocks = [
-    "NVDA","AMD","PLTR","TSLA","SOFI","AAPL",
-    "MSFT","GOOGL","META","AMZN","NFLX",
-    "AVGO","MU","QCOM","INTC",
-    "RIVN","LCID","NIO",
+    # big tech / AI
+    "NVDA","AMD","INTC","TSM","AVGO",
+    "AAPL","MSFT","GOOGL","META","AMZN","NFLX",
+
+    # EV / growth
+    "TSLA","RIVN","LCID","NIO","XPEV",
+
+    # fintech / crypto exposure
+    "COIN","MSTR","SQ","PYPL","HOOD",
+
+    # momentum / retail trading favorites
+    "PLTR","SOFI","RIOT","MARA","DKNG",
+
+    # banking / market core
     "JPM","BAC","WFC","GS","MS",
+
+    # healthcare / defensive
     "UNH","LLY","JNJ","PFE","MRK",
+
+    # retail / consumer
     "WMT","COST","TGT","HD","LOW",
+
+    # travel / lifestyle
     "NKE","SBUX",
-    "COIN","MSTR","RIOT","MARA","HOOD",
-    "SHOP","SQ","PYPL","ROKU","SPOT",
-    "CRWD","SNOW","NET","OKTA","DDOG",
-    "ADBE","ORCL"
+
+    # cloud / SaaS
+    "CRWD","SNOW","NET","OKTA","DDOG","ADBE","ORCL"
 ]
 
-# ---------------- REAL SCORING ENGINE ----------------
+
+# ---------------- REAL TRADING SCORE ENGINE ----------------
 def score_stock(ticker):
     try:
         data = yf.Ticker(ticker)
-        hist = data.history(period="3mo")
+        hist = data.history(period="5d")
 
-        if hist is None or hist.empty or len(hist) < 20:
-            return 3, "NO DATA"
+        if hist is None or hist.empty or len(hist) < 3:
+            return 5, "NO DATA", ["Not enough market data"]
 
         close = hist["Close"].dropna()
         volume = hist["Volume"].dropna()
 
         price = close.iloc[-1]
+        prev_price = close.iloc[-2] if len(close) > 1 else price
 
-        # trend
-        sma10 = close.rolling(10).mean().dropna()
-        sma20 = close.rolling(20).mean().dropna()
+        change = (price - prev_price) / prev_price if prev_price != 0 else 0
 
-        sma_fast = sma10.iloc[-1] if len(sma10) else price
-        sma_slow = sma20.iloc[-1] if len(sma20) else price
+        # volume logic
+        vol_avg = volume.mean() if len(volume) > 0 else 1
+        vol_now = volume.iloc[-1] if len(volume) > 0 else vol_avg
+        vol_ratio = vol_now / vol_avg if vol_avg > 0 else 1
 
-        # momentum
-        high_10 = close.iloc[-10:].max()
-        high_20 = close.iloc[-20:].max()
+        # short trend
+        high_5 = close.max()
 
-        # volume pressure
-        vol_avg = volume.rolling(10).mean().dropna()
-        vol_ratio = 1
-
-        if len(vol_avg):
-            vol_ratio = volume.iloc[-1] / vol_avg.iloc[-1]
-
-        score = 0
+        score = 5
         reasons = []
 
-        # ---------------- TREND ----------------
-        if price > sma_fast:
-            score += 2
-            reasons.append("Above short-term trend")
-        if price > sma_slow:
-            score += 2
-            reasons.append("Above mid trend")
-
         # ---------------- MOMENTUM ----------------
-        if price >= high_10:
+        if change > 0.04:
             score += 3
-            reasons.append("Near breakout (10-day high)")
-        elif price >= high_20:
+            reasons.append("Strong upward momentum today")
+        elif change > 0.015:
             score += 2
-            reasons.append("Strong momentum")
+            reasons.append("Positive price movement")
+        elif change < -0.04:
+            score -= 2
+            reasons.append("Sharp downward move")
+        else:
+            reasons.append("Flat/neutral movement")
+
+        # ---------------- BREAKOUT LOGIC ----------------
+        if price >= high_5:
+            score += 2
+            reasons.append("Near short-term breakout high")
+        elif price >= high_5 * 0.98:
+            score += 1
+            reasons.append("Testing resistance levels")
 
         # ---------------- VOLUME ----------------
         if vol_ratio > 2:
             score += 3
-            reasons.append("High volume spike")
+            reasons.append("Very high volume spike (institutional interest)")
         elif vol_ratio > 1.5:
             score += 2
             reasons.append("Above average volume")
         elif vol_ratio > 1.1:
             score += 1
+        else:
+            reasons.append("Low volume activity")
 
-        score = min(score, 10)
+        score = max(1, min(score, 10))
 
-        # label
+        # label system
         if score >= 8:
             label = "🚀 BREAKOUT"
         elif score >= 6:
@@ -101,27 +117,39 @@ def score_stock(ticker):
         return score, label, reasons
 
     except:
-        return 3, "ERROR", ["Data unavailable"]
+        return 5, "ERROR", ["Data fetch failed"]
 
 
-# ---------------- /RATE ----------------
+# ---------------- /RATE (detailed explanation) ----------------
 @tree.command(name="rate")
 async def rate(interaction: discord.Interaction, ticker: str):
 
     await interaction.response.defer()
 
-    t = ticker.upper()
-    s, label, reasons = score_stock(t)
+    score, label, reasons = score_stock(ticker.upper())
 
-    msg = f"📊 {t}\n{label} → {s}/10\n\n"
+    msg = f"📊 **{ticker.upper()} ANALYSIS**\n"
+    msg += f"{label} → {score}/10\n\n"
 
-    for r in reasons[:4]:
+    msg += "📈 SIGNAL BREAKDOWN:\n"
+    for r in reasons:
         msg += f"• {r}\n"
+
+    msg += "\n🧠 INTERPRETATION:\n"
+
+    if score >= 8:
+        msg += "Strong momentum with breakout conditions. High short-term trader interest."
+    elif score >= 6:
+        msg += "Healthy bullish structure. Possible continuation trend forming."
+    elif score >= 4:
+        msg += "Mixed signals. No clear directional dominance."
+    else:
+        msg += "Weak structure. Low momentum and low conviction."
 
     await interaction.followup.send(msg)
 
 
-# ---------------- /SCAN ----------------
+# ---------------- /SCAN (market overview) ----------------
 @tree.command(name="scan")
 async def scan(interaction: discord.Interaction):
 
@@ -130,12 +158,12 @@ async def scan(interaction: discord.Interaction):
     results = []
 
     for s in stocks:
-        score, label, reasons = score_stock(s)
-        results.append((s, score, label, reasons))
+        sc, label, _ = score_stock(s)
+        results.append((s, sc, label))
 
     results.sort(key=lambda x: x[1], reverse=True)
 
-    msg = "📊 MARKET SCAN\n\n"
+    msg = "📊 **MARKET SCAN (TOP MOVERS)**\n\n"
 
     for r in results[:10]:
         msg += f"{r[0]} → {r[1]}/10 {r[2]}\n"
@@ -152,17 +180,17 @@ async def breakouts(interaction: discord.Interaction):
     results = []
 
     for s in stocks:
-        score, label, reasons = score_stock(s)
-        if score >= 8:
-            results.append((s, score))
+        sc, label, _ = score_stock(s)
+        if sc >= 8:
+            results.append((s, sc))
 
     if not results:
-        await interaction.followup.send("No breakouts right now.")
+        await interaction.followup.send("No strong breakouts detected.")
         return
 
     results.sort(key=lambda x: x[1], reverse=True)
 
-    msg = "🚀 BREAKOUT LIST\n\n"
+    msg = "🚀 **BREAKOUT WATCHLIST**\n\n"
 
     for r in results:
         msg += f"{r[0]} → {r[1]}/10\n"
@@ -181,9 +209,10 @@ async def compare(interaction: discord.Interaction, stock1: str, stock2: str):
 
     winner = stock1.upper() if s1 > s2 else stock2.upper() if s2 > s1 else "Tie"
 
-    msg = f"{stock1.upper()} → {s1}/10 {l1}\n"
+    msg = f"📊 **COMPARE MODE**\n\n"
+    msg += f"{stock1.upper()} → {s1}/10 {l1}\n"
     msg += f"{stock2.upper()} → {s2}/10 {l2}\n\n"
-    msg += f"Winner: {winner}"
+    msg += f"🏆 Winner: {winner}"
 
     await interaction.followup.send(msg)
 
@@ -192,7 +221,7 @@ async def compare(interaction: discord.Interaction, stock1: str, stock2: str):
 @client.event
 async def on_ready():
     await tree.sync()
-    print("Bot is running")
+    print("Bot is running - Trading Engine Active")
 
 
 client.run(TOKEN)
