@@ -2,12 +2,9 @@ import discord
 from discord import app_commands
 import yfinance as yf
 import os
-from flask import Flask
-import threading
 
 TOKEN = os.getenv("TOKEN")
 
-# ---------------- DISCORD BOT ----------------
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
@@ -135,18 +132,4 @@ async def on_ready():
     print("Bot is running")
 
 
-# ---------------- WEB SERVER (FIX FOR RENDER) ----------------
-app = Flask("")
-
-@app.route("/")
-def home():
-    return "Bot is alive"
-
-def run_web():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
-
-
-# ---------------- START BOTH ----------------
-threading.Thread(target=run_web).start()
 client.run(TOKEN)
