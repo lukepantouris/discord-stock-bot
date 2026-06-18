@@ -14,7 +14,7 @@ tree = app_commands.CommandTree(client)
 
 WATCH_FILE = "watchlists.json"
 
-# ---------------- PERSISTENT STORAGE ----------------
+# ---------------- STORAGE ----------------
 def load_watchlists():
     try:
         with open(WATCH_FILE, "r") as f:
@@ -28,7 +28,7 @@ def save_watchlists(data):
 
 user_watchlists = load_watchlists()
 
-# ---------------- STOCK UNIVERSE ----------------
+# ---------------- UNIVERSE ----------------
 stocks = [
     "NVDA","AMD","INTC","TSM","AVGO","ASML","ARM",
     "AAPL","MSFT","GOOGL","META","AMZN","NFLX","TSLA",
@@ -43,16 +43,30 @@ stocks = [
     "ADBE","ORCL","CRM","IBM"
 ]
 
-# ---------------- SECTOR MAP ----------------
-sector_map = {
-    "NVDA":"AI","AMD":"AI","INTC":"AI","PLTR":"AI","AI":"AI",
-    "TSLA":"EV","RIVN":"EV","LCID":"EV","NIO":"EV","XPEV":"EV","LI":"EV",
-    "JPM":"BANK","BAC":"BANK","WFC":"BANK","GS":"BANK","MS":"BANK",
-    "COIN":"CRYPTO","MSTR":"CRYPTO","RIOT":"CRYPTO","MARA":"CRYPTO",
-    "AAPL":"TECH","MSFT":"TECH","GOOGL":"TECH","META":"TECH","AMZN":"TECH"
-}
+# ---------------- PRICE ENGINE ----------------
+def get_price_data(ticker):
+    try:
+        data = yf.Ticker(ticker)
+        hist = data.history(period="5d")
 
-# ---------------- SMART SCORE ENGINE ----------------
+        if hist is None or hist.empty:
+            return None
+
+        close = hist["Close"].dropna()
+        volume = hist["Volume"].dropna()
+
+        price = close.iloc[-1]
+        prev = close.iloc[-2] if len(close) > 1 else price
+
+        change = (price - prev) / prev if prev else 0
+
+        return price, change, volume
+
+    except:
+        return None
+
+
+# ---------------- INSTITUTIONAL SCORE ----------------
 def score_stock(ticker):
     try:
         data = yf.Ticker(ticker)
@@ -67,47 +81,45 @@ def score_stock(ticker):
         price = close.iloc[-1]
         prev = close.iloc[-2]
 
-        change = (price - prev) / prev if prev != 0 else 0
+        change = (price - prev) / prev if prev else 0
 
         vol_avg = volume.mean() if len(volume) else 1
         vol_now = volume.iloc[-1] if len(volume) else vol_avg
         vol_ratio = vol_now / vol_avg if vol_avg else 1
 
-        # ---------------- INSTITUTIONAL SCORING ----------------
-        score = 5.0
+        score = 5
         reasons = []
 
-        # trend strength
+        # trend
         if change > 0.05:
             score += 2.5
-            reasons.append("Strong bullish impulse")
+            reasons.append("Strong bullish momentum")
         elif change > 0.02:
             score += 1.5
             reasons.append("Uptrend forming")
         elif change < -0.05:
             score -= 2
-            reasons.append("Heavy sell pressure")
+            reasons.append("Strong sell pressure")
         else:
             reasons.append("Neutral trend")
 
-        # volume confirmation
+        # volume
         if vol_ratio > 2.5:
             score += 2.5
             reasons.append("Institutional volume spike")
         elif vol_ratio > 1.5:
             score += 1.5
-            reasons.append("Above average participation")
+            reasons.append("Above average volume")
 
-        # stability penalty (removes fake spikes)
-        volatility = abs(change)
-        if volatility > 0.08:
+        # volatility filter
+        if abs(change) > 0.1:
             score -= 1
             reasons.append("High volatility risk")
 
         score = max(1, min(int(round(score)), 10))
 
         if score >= 8:
-            label = "🚀 INSTITUTIONAL BREAKOUT"
+            label = "🚀 BREAKOUT"
         elif score >= 6:
             label = "🔥 ACCUMULATION"
         elif score >= 4:
@@ -121,7 +133,7 @@ def score_stock(ticker):
         return 5, "ERROR", ["Data failure"], 0
 
 
-# ---------------- ASYNC SAFE ----------------
+# ---------------- SAFE WRAPPER ----------------
 async def safe_score(ticker):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, score_stock, ticker)
@@ -135,18 +147,34 @@ async def rate(interaction: discord.Interaction, ticker: str):
 
     score, label, reasons, change = await safe_score(ticker.upper())
 
+    price_data = get_price_data(ticker.upper())
+
     msg = f"📊 **{ticker.upper()} INSTITUTIONAL ANALYSIS**\n"
     msg += f"{label} → {score}/10\n"
-    msg += f"Move: {round(change*100,2)}%\n\n"
+    msg += f"Move: {round(change*100,2)}%\n"
 
-    msg += "📌 Signals:\n"
+    if price_data:
+        price, _, _ = price_data
+        msg += f"Price: ${round(price,2)}\n"
+
+    msg += "\n📌 Signals:\n"
     for r in reasons:
         msg += f"• {r}\n"
+
+    # AI-style explanation
+    if score >= 8:
+        msg += "\n🧠 Why: Strong institutional buying pressure + momentum continuation."
+    elif score >= 6:
+        msg += "\n🧠 Why: Accumulation phase with volume confirmation."
+    elif score >= 4:
+        msg += "\n🧠 Why: Mixed signals, no clear trend."
+    else:
+        msg += "\n🧠 Why: Distribution phase or weak demand."
 
     await interaction.followup.send(msg)
 
 
-# ---------------- /SCAN (SMART FILTERED) ----------------
+# ---------------- /SCAN ----------------
 @tree.command(name="scan")
 async def scan(interaction: discord.Interaction):
 
@@ -160,7 +188,7 @@ async def scan(interaction: discord.Interaction):
 
     results.sort(key=lambda x: x[1], reverse=True)
 
-    msg = "📊 **INSTITUTIONAL MARKET SCAN**\n\n"
+    msg = "📊 **INSTITUTIONAL MARKET SCAN v6**\n\n"
 
     for r in results[:10]:
         msg += f"{r[0]} → {r[1]}/10 {r[2]} ({round(r[3]*100,2)}%)\n"
@@ -168,33 +196,7 @@ async def scan(interaction: discord.Interaction):
     await interaction.followup.send(msg)
 
 
-# ---------------- /SECTOR HEATMAP ----------------
-@tree.command(name="sector")
-async def sector(interaction: discord.Interaction):
-
-    await interaction.response.defer()
-
-    heat = {}
-
-    for s in stocks[:25]:
-        sc, _, _, _ = await safe_score(s)
-        sec = sector_map.get(s, "OTHER")
-
-        if sec not in heat:
-            heat[sec] = []
-
-        heat[sec].append(sc)
-
-    msg = "📊 **SECTOR HEATMAP**\n\n"
-
-    for sec, scores in heat.items():
-        avg = sum(scores) / len(scores)
-        msg += f"{sec}: {round(avg,1)}/10\n"
-
-    await interaction.followup.send(msg)
-
-
-# ---------------- /BREAKOUTS (FILTERED) ----------------
+# ---------------- /BREAKOUTS ----------------
 @tree.command(name="breakouts")
 async def breakouts(interaction: discord.Interaction):
 
@@ -208,7 +210,7 @@ async def breakouts(interaction: discord.Interaction):
             results.append((s, sc))
 
     if not results:
-        await interaction.followup.send("No institutional breakouts detected.")
+        await interaction.followup.send("No institutional breakouts right now.")
         return
 
     results.sort(key=lambda x: x[1], reverse=True)
@@ -221,7 +223,7 @@ async def breakouts(interaction: discord.Interaction):
     await interaction.followup.send(msg)
 
 
-# ---------------- /WATCH ----------------
+# ---------------- WATCH ----------------
 @tree.command(name="watch")
 async def watch(interaction: discord.Interaction, ticker: str):
 
@@ -236,25 +238,64 @@ async def watch(interaction: discord.Interaction, ticker: str):
     await interaction.response.send_message(f"Added {ticker.upper()} to watchlist")
 
 
-# ---------------- /PORT ----------------
+# ---------------- PORTFOLIO ANALYSIS ----------------
 @tree.command(name="port")
 async def port(interaction: discord.Interaction):
 
     uid = str(interaction.user.id)
 
     if uid not in user_watchlists or not user_watchlists[uid]:
-        await interaction.response.send_message("No watchlist found")
+        await interaction.response.send_message("No watchlist found.")
         return
 
     tickers = user_watchlists[uid][:10]
 
-    msg = "📈 YOUR PORTFOLIO\n\n"
+    scores = []
+
+    msg = "📈 **PORTFOLIO ANALYSIS v6**\n\n"
 
     for t in tickers:
         sc, label, _, _ = await safe_score(t)
+        scores.append(sc)
         msg += f"{t} → {sc}/10 {label}\n"
 
+    avg = sum(scores) / len(scores)
+
+    msg += f"\n📊 Portfolio Strength: {round(avg,1)}/10"
+
     await interaction.response.send_message(msg)
+
+
+# ---------------- SECTOR HEATMAP ----------------
+@tree.command(name="sector")
+async def sector(interaction: discord.Interaction):
+
+    await interaction.response.defer()
+
+    heat = {}
+
+    for s in stocks[:25]:
+        sc, _, _, _ = await safe_score(s)
+        sec = "OTHER"
+
+        if s in ["NVDA","AMD","AAPL","MSFT","GOOGL","META"]:
+            sec = "TECH"
+        elif s in ["JPM","BAC","GS","MS"]:
+            sec = "BANK"
+        elif s in ["COIN","MSTR","RIOT"]:
+            sec = "CRYPTO"
+
+        if sec not in heat:
+            heat[sec] = []
+
+        heat[sec].append(sc)
+
+    msg = "📊 **SECTOR HEATMAP v6**\n\n"
+
+    for k,v in heat.items():
+        msg += f"{k}: {round(sum(v)/len(v),1)}/10\n"
+
+    await interaction.followup.send(msg)
 
 
 # ---------------- WAKE ----------------
@@ -276,7 +317,7 @@ async def wake(interaction: discord.Interaction):
 @client.event
 async def on_ready():
     await tree.sync()
-    print("INSTITUTIONAL V5 ONLINE")
+    print("INSTITUTIONAL V6 ONLINE")
 
 
 # ---------------- RUN ----------------
