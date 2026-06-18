@@ -9,6 +9,7 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
+# ---------------- WATCHLIST ----------------
 stocks = [
     "NVDA","AMD","PLTR","TSLA","SOFI","AAPL",
     "MSFT","GOOGL","META","AMZN","NFLX",
@@ -24,112 +25,174 @@ stocks = [
     "ADBE","ORCL"
 ]
 
-def score(ticker):
+# ---------------- REAL SCORING ENGINE ----------------
+def score_stock(ticker):
     try:
         data = yf.Ticker(ticker)
-        hist = data.history(period="6mo")
+        hist = data.history(period="3mo")
 
-        if hist is None or hist.empty or len(hist) < 60:
-            return 0
+        if hist is None or hist.empty or len(hist) < 20:
+            return 3, "NO DATA"
 
         close = hist["Close"].dropna()
         volume = hist["Volume"].dropna()
 
         price = close.iloc[-1]
 
-        sma50 = close.rolling(50).mean().dropna()
-        if sma50.empty:
-            return 0
-        sma50 = sma50.iloc[-1]
+        # trend
+        sma10 = close.rolling(10).mean().dropna()
+        sma20 = close.rolling(20).mean().dropna()
 
-        vol_avg = volume.rolling(20).mean().dropna()
-        if vol_avg.empty:
-            return 0
-        vol_avg = vol_avg.iloc[-1]
+        sma_fast = sma10.iloc[-1] if len(sma10) else price
+        sma_slow = sma20.iloc[-1] if len(sma20) else price
 
-        vol_ratio = volume.iloc[-1] / vol_avg if vol_avg > 0 else 0
+        # momentum
+        high_10 = close.iloc[-10:].max()
+        high_20 = close.iloc[-20:].max()
 
-        last_10_high = close.iloc[-10:].max()
+        # volume pressure
+        vol_avg = volume.rolling(10).mean().dropna()
+        vol_ratio = 1
 
-        s = 0
-        if price > sma50:
-            s += 3
-        if price >= last_10_high:
-            s += 3
+        if len(vol_avg):
+            vol_ratio = volume.iloc[-1] / vol_avg.iloc[-1]
+
+        score = 0
+        reasons = []
+
+        # ---------------- TREND ----------------
+        if price > sma_fast:
+            score += 2
+            reasons.append("Above short-term trend")
+        if price > sma_slow:
+            score += 2
+            reasons.append("Above mid trend")
+
+        # ---------------- MOMENTUM ----------------
+        if price >= high_10:
+            score += 3
+            reasons.append("Near breakout (10-day high)")
+        elif price >= high_20:
+            score += 2
+            reasons.append("Strong momentum")
+
+        # ---------------- VOLUME ----------------
         if vol_ratio > 2:
-            s += 3
+            score += 3
+            reasons.append("High volume spike")
         elif vol_ratio > 1.5:
-            s += 2
-        elif vol_ratio > 1.2:
-            s += 1
+            score += 2
+            reasons.append("Above average volume")
+        elif vol_ratio > 1.1:
+            score += 1
 
-        return min(s, 10)
+        score = min(score, 10)
+
+        # label
+        if score >= 8:
+            label = "🚀 BREAKOUT"
+        elif score >= 6:
+            label = "🔥 STRONG"
+        elif score >= 4:
+            label = "👀 WATCH"
+        else:
+            label = "❌ WEAK"
+
+        return score, label, reasons
 
     except:
-        return 0
+        return 3, "ERROR", ["Data unavailable"]
 
 
+# ---------------- /RATE ----------------
 @tree.command(name="rate")
 async def rate(interaction: discord.Interaction, ticker: str):
+
     await interaction.response.defer()
 
     t = ticker.upper()
-    s = score(t)
+    s, label, reasons = score_stock(t)
 
-    label = "🚀 BREAKOUT" if s >= 8 else "🔥 STRONG" if s >= 6 else "👀 WATCH" if s >= 4 else "❌ WEAK"
+    msg = f"📊 {t}\n{label} → {s}/10\n\n"
 
-    await interaction.followup.send(f"{t} → {s}/10 ({label})")
-
-
-@tree.command(name="scan")
-async def scan(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    results = [(s, score(s)) for s in stocks]
-    results.sort(key=lambda x: x[1], reverse=True)
-
-    msg = "📊 TOP STOCKS\n\n"
-    for r in results[:7]:
-        msg += f"{r[0]} → {r[1]}/10\n"
+    for r in reasons[:4]:
+        msg += f"• {r}\n"
 
     await interaction.followup.send(msg)
 
 
-@tree.command(name="breakouts")
-async def breakouts(interaction: discord.Interaction):
+# ---------------- /SCAN ----------------
+@tree.command(name="scan")
+async def scan(interaction: discord.Interaction):
+
     await interaction.response.defer()
 
-    results = [(s, score(s)) for s in stocks]
-    results = [r for r in results if r[1] >= 8]
+    results = []
+
+    for s in stocks:
+        score, label, reasons = score_stock(s)
+        results.append((s, score, label, reasons))
+
+    results.sort(key=lambda x: x[1], reverse=True)
+
+    msg = "📊 MARKET SCAN\n\n"
+
+    for r in results[:10]:
+        msg += f"{r[0]} → {r[1]}/10 {r[2]}\n"
+
+    await interaction.followup.send(msg)
+
+
+# ---------------- /BREAKOUTS ----------------
+@tree.command(name="breakouts")
+async def breakouts(interaction: discord.Interaction):
+
+    await interaction.response.defer()
+
+    results = []
+
+    for s in stocks:
+        score, label, reasons = score_stock(s)
+        if score >= 8:
+            results.append((s, score))
 
     if not results:
         await interaction.followup.send("No breakouts right now.")
         return
 
-    msg = "🚀 BREAKOUTS\n\n"
+    results.sort(key=lambda x: x[1], reverse=True)
+
+    msg = "🚀 BREAKOUT LIST\n\n"
+
     for r in results:
         msg += f"{r[0]} → {r[1]}/10\n"
 
     await interaction.followup.send(msg)
 
 
+# ---------------- /COMPARE ----------------
 @tree.command(name="compare")
 async def compare(interaction: discord.Interaction, stock1: str, stock2: str):
+
     await interaction.response.defer()
 
-    s1, s2 = stock1.upper(), stock2.upper()
-    sc1, sc2 = score(s1), score(s2)
+    s1, l1, r1 = score_stock(stock1.upper())
+    s2, l2, r2 = score_stock(stock2.upper())
 
-    winner = s1 if sc1 > sc2 else s2 if sc2 > sc1 else "Tie"
+    winner = stock1.upper() if s1 > s2 else stock2.upper() if s2 > s1 else "Tie"
 
-    await interaction.followup.send(
-        f"{s1}: {sc1}/10\n{s2}: {sc2}/10\nWinner: {winner}"
-    )
+    msg = f"{stock1.upper()} → {s1}/10 {l1}\n"
+    msg += f"{stock2.upper()} → {s2}/10 {l2}\n\n"
+    msg += f"Winner: {winner}"
+
+    await interaction.followup.send(msg)
 
 
+# ---------------- READY ----------------
 @client.event
 async def on_ready():
     await tree.sync()
     print("Bot is running")
+
 
 client.run(TOKEN)
