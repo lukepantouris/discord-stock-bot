@@ -2,14 +2,16 @@ import discord
 from discord import app_commands
 import yfinance as yf
 import os
+from flask import Flask
+import threading
 
 TOKEN = os.getenv("TOKEN")
 
+# ---------------- DISCORD BOT ----------------
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# ---------------- STOCK LIST ----------------
 stocks = [
     "NVDA","AMD","PLTR","TSLA","SOFI","AAPL",
     "MSFT","GOOGL","META","AMZN","NFLX",
@@ -25,13 +27,12 @@ stocks = [
     "ADBE","ORCL"
 ]
 
-# ---------------- SAFE SCORE SYSTEM ----------------
+# ---------------- SAFE SCORE ----------------
 def score(ticker):
     try:
         data = yf.Ticker(ticker)
         hist = data.history(period="6mo")
 
-        # safety checks (CRITICAL FIX)
         if hist is None or hist.empty or len(hist) < 60:
             return 0
 
@@ -43,139 +44,109 @@ def score(ticker):
 
         price = close.iloc[-1]
 
-        sma50_series = close.rolling(50).mean().dropna()
-        if sma50_series.empty:
+        sma50 = close.rolling(50).mean().dropna()
+        if sma50.empty:
             return 0
-        sma50 = sma50_series.iloc[-1]
+        sma50 = sma50.iloc[-1]
 
-        vol_avg_series = volume.rolling(20).mean().dropna()
-        if vol_avg_series.empty:
+        vol_avg = volume.rolling(20).mean().dropna()
+        if vol_avg.empty:
             return 0
-        vol_avg = vol_avg_series.iloc[-1]
+        vol_avg = vol_avg.iloc[-1]
 
         vol_now = volume.iloc[-1]
         vol_ratio = vol_now / vol_avg if vol_avg > 0 else 0
 
         last_10_high = close.iloc[-10:].max()
 
-        score = 0
+        s = 0
 
-        # Trend
         if price > sma50:
-            score += 3
-
-        # Momentum
+            s += 3
         if price >= last_10_high:
-            score += 3
-
-        # Volume spike
+            s += 3
         if vol_ratio > 2:
-            score += 3
+            s += 3
         elif vol_ratio > 1.5:
-            score += 2
+            s += 2
         elif vol_ratio > 1.2:
-            score += 1
+            s += 1
 
-        return min(score, 10)
+        return min(s, 10)
 
     except:
         return 0
 
 
-# ---------------- /RATE ----------------
-@tree.command(name="rate", description="Rate a stock")
+# ---------------- COMMANDS ----------------
+@tree.command(name="rate")
 async def rate(interaction: discord.Interaction, ticker: str):
     t = ticker.upper()
-
     s = score(t)
 
-    if s >= 8:
-        label = "🚀 BREAKOUT"
-    elif s >= 6:
-        label = "🔥 STRONG"
-    elif s >= 4:
-        label = "👀 WATCH"
-    else:
-        label = "❌ WEAK"
+    label = "🚀 BREAKOUT" if s >= 8 else "🔥 STRONG" if s >= 6 else "👀 WATCH" if s >= 4 else "❌ WEAK"
 
     await interaction.response.send_message(f"{t} → {s}/10 ({label})")
 
 
-# ---------------- /SCAN ----------------
-@tree.command(name="scan", description="Scan stocks")
+@tree.command(name="scan")
 async def scan(interaction: discord.Interaction):
-
     results = [(s, score(s)) for s in stocks]
     results.sort(key=lambda x: x[1], reverse=True)
 
     msg = "📊 TOP STOCKS\n\n"
-
     for r in results[:7]:
         msg += f"{r[0]} → {r[1]}/10\n"
 
     await interaction.response.send_message(msg)
 
 
-# ---------------- /BREAKOUTS ----------------
-@tree.command(name="breakouts", description="Only breakout stocks")
+@tree.command(name="breakouts")
 async def breakouts(interaction: discord.Interaction):
-
     results = [(s, score(s)) for s in stocks]
     results = [r for r in results if r[1] >= 8]
-    results.sort(key=lambda x: x[1], reverse=True)
 
     if not results:
         await interaction.response.send_message("No breakouts right now.")
         return
 
     msg = "🚀 BREAKOUTS\n\n"
-
     for r in results:
         msg += f"{r[0]} → {r[1]}/10\n"
 
     await interaction.response.send_message(msg)
 
 
-# ---------------- /COMPARE ----------------
-@tree.command(name="compare", description="Compare stocks")
+@tree.command(name="compare")
 async def compare(interaction: discord.Interaction, stock1: str, stock2: str):
-
-    s1 = stock1.upper()
-    s2 = stock2.upper()
-
-    sc1 = score(s1)
-    sc2 = score(s2)
+    s1, s2 = stock1.upper(), stock2.upper()
+    sc1, sc2 = score(s1), score(s2)
 
     winner = s1 if sc1 > sc2 else s2 if sc2 > sc1 else "Tie"
 
-    msg = f"📊 {s1} vs {s2}\n\n"
-    msg += f"{s1}: {sc1}/10\n"
-    msg += f"{s2}: {sc2}/10\n\n"
-    msg += f"Winner: {winner}"
-
-    await interaction.response.send_message(msg)
+    await interaction.response.send_message(
+        f"{s1}: {sc1}/10\n{s2}: {sc2}/10\nWinner: {winner}"
+    )
 
 
-# ---------------- MOMENTUM ----------------
-@tree.command(name="momentum", description="Fast movers")
-async def momentum(interaction: discord.Interaction):
-
-    results = [(s, score(s)) for s in stocks]
-    results.sort(key=lambda x: x[1], reverse=True)
-
-    msg = "⚡ MOMENTUM\n\n"
-
-    for r in results[:5]:
-        msg += f"{r[0]} → {r[1]}/10\n"
-
-    await interaction.response.send_message(msg)
-
-
-# ---------------- BOT START ----------------
 @client.event
 async def on_ready():
     await tree.sync()
     print("Bot is running")
 
 
+# ---------------- WEB SERVER (FIX FOR RENDER) ----------------
+app = Flask("")
+
+@app.route("/")
+def home():
+    return "Bot is alive"
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+
+# ---------------- START BOTH ----------------
+threading.Thread(target=run_web).start()
 client.run(TOKEN)
