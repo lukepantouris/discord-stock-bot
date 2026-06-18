@@ -3,6 +3,7 @@ from discord import app_commands
 import yfinance as yf
 import os
 import asyncio
+import json
 import time
 
 TOKEN = os.getenv("TOKEN")
@@ -11,7 +12,23 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# ---------------- WATCHLIST ----------------
+WATCH_FILE = "watchlists.json"
+
+# ---------------- LOAD WATCHLISTS (PERSISTENT) ----------------
+def load_watchlists():
+    try:
+        with open(WATCH_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_watchlists(data):
+    with open(WATCH_FILE, "w") as f:
+        json.dump(data, f)
+
+user_watchlists = load_watchlists()
+
+# ---------------- STOCK UNIVERSE ----------------
 stocks = [
     "NVDA","AMD","INTC","TSM","AVGO","ASML","ARM",
     "AAPL","MSFT","GOOGL","META","AMZN","NFLX","TSLA",
@@ -26,17 +43,14 @@ stocks = [
     "ADBE","ORCL","CRM","IBM"
 ]
 
-# ---------------- USER WATCHLIST STORAGE ----------------
-user_watchlists = {}
-
-# ---------------- CORE SCORE ----------------
+# ---------------- CORE SCORING ENGINE ----------------
 def score_stock(ticker):
     try:
         data = yf.Ticker(ticker)
         hist = data.history(period="5d")
 
         if hist is None or hist.empty or len(hist) < 3:
-            return 5, "NO DATA", ["No market data"]
+            return 5, "NO DATA", ["No data available"], 0
 
         close = hist["Close"].dropna()
         volume = hist["Volume"].dropna()
@@ -54,13 +68,13 @@ def score_stock(ticker):
         reasons = []
 
         # momentum
-        if change > 0.04:
+        if change > 0.05:
             score += 3
-            reasons.append("Strong upward momentum")
-        elif change > 0.015:
+            reasons.append("Strong bullish momentum")
+        elif change > 0.02:
             score += 2
-            reasons.append("Positive movement")
-        elif change < -0.04:
+            reasons.append("Positive momentum building")
+        elif change < -0.05:
             score -= 2
             reasons.append("Strong sell pressure")
         else:
@@ -69,7 +83,7 @@ def score_stock(ticker):
         # volume
         if vol_ratio > 2:
             score += 3
-            reasons.append("Heavy volume spike")
+            reasons.append("Institutional volume spike")
         elif vol_ratio > 1.5:
             score += 2
             reasons.append("Above average volume")
@@ -90,24 +104,29 @@ def score_stock(ticker):
         return score, label, reasons, change
 
     except:
-        return 5, "ERROR", ["Data error"], 0
+        return 5, "ERROR", ["Data fetch failed"], 0
 
 
-# ---------------- SAFE WRAPPER ----------------
+# ---------------- ASYNC WRAPPER ----------------
 async def safe_score(ticker):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, score_stock, ticker)
 
 
-# ---------------- WHY EXPLANATION ENGINE ----------------
-def explain(score, change):
-    if score >= 8:
-        return "Strong breakout momentum with volume confirmation."
-    if score >= 6:
-        return "Healthy bullish trend forming with steady buying pressure."
-    if score >= 4:
-        return "Mixed signals — no strong trend confirmation yet."
-    return "Weak momentum and low buying interest."
+# ---------------- EMBED BUILDER ----------------
+def build_embed(title, score, label, change, reasons):
+    embed = discord.Embed(title=title, color=0x00ff99)
+
+    embed.add_field(name="Score", value=f"{label} → {score}/10", inline=False)
+    embed.add_field(name="Change", value=f"{round(change*100,2)}%", inline=False)
+
+    embed.add_field(
+        name="Reasons",
+        value="\n".join([f"• {r}" for r in reasons]),
+        inline=False
+    )
+
+    return embed
 
 
 # ---------------- /RATE ----------------
@@ -118,17 +137,15 @@ async def rate(interaction: discord.Interaction, ticker: str):
 
     score, label, reasons, change = await safe_score(ticker.upper())
 
-    msg = f"📊 **{ticker.upper()} ANALYSIS**\n"
-    msg += f"{label} → {score}/10\n"
-    msg += f"Price Change: {round(change*100,2)}%\n\n"
+    embed = build_embed(
+        f"{ticker.upper()} ANALYSIS",
+        score,
+        label,
+        change,
+        reasons
+    )
 
-    msg += "📈 Breakdown:\n"
-    for r in reasons:
-        msg += f"• {r}\n"
-
-    msg += f"\n🧠 Why:\n{explain(score, change)}"
-
-    await interaction.followup.send(msg)
+    await interaction.followup.send(embed=embed)
 
 
 # ---------------- /SCAN ----------------
@@ -145,12 +162,17 @@ async def scan(interaction: discord.Interaction):
 
     results.sort(key=lambda x: x[1], reverse=True)
 
-    msg = "📊 **MARKET SCAN**\n\n"
-
+    msg = ""
     for r in results[:10]:
-        msg += f"{r[0]} → {r[1]}/10 {r[2]} ({round(r[3]*100,2)}%)\n"
+        msg += f"**{r[0]}** → {r[1]}/10 {r[2]} ({round(r[3]*100,2)}%)\n"
 
-    await interaction.followup.send(msg)
+    embed = discord.Embed(
+        title="📊 MARKET SCAN",
+        description=msg,
+        color=0x3498db
+    )
+
+    await interaction.followup.send(embed=embed)
 
 
 # ---------------- /BREAKOUTS ----------------
@@ -172,26 +194,32 @@ async def breakouts(interaction: discord.Interaction):
 
     results.sort(key=lambda x: x[1], reverse=True)
 
-    msg = "🚀 **BREAKOUT ALERTS**\n\n"
+    msg = "\n".join([f"🚀 {r[0]} → {r[1]}/10" for r in results])
 
-    for r in results:
-        msg += f"{r[0]} → {r[1]}/10\n"
+    embed = discord.Embed(
+        title="🚨 BREAKOUT ALERTS",
+        description=msg,
+        color=0xff0000
+    )
 
-    await interaction.followup.send(msg)
+    await interaction.followup.send(embed=embed)
 
 
-# ---------------- /WATCHLIST ----------------
+# ---------------- /WATCH ----------------
 @tree.command(name="watch")
 async def watch(interaction: discord.Interaction, ticker: str):
 
-    uid = interaction.user.id
+    uid = str(interaction.user.id)
 
     if uid not in user_watchlists:
         user_watchlists[uid] = []
 
     user_watchlists[uid].append(ticker.upper())
+    save_watchlists(user_watchlists)
 
-    await interaction.response.send_message(f"Added {ticker.upper()} to your watchlist.")
+    await interaction.response.send_message(
+        f"✅ Added {ticker.upper()} to your watchlist."
+    )
 
 
 # ---------------- /COMPARE ----------------
@@ -205,44 +233,50 @@ async def compare(interaction: discord.Interaction, stock1: str, stock2: str):
 
     winner = stock1.upper() if s1 > s2 else stock2.upper() if s2 > s1 else "Tie"
 
-    msg = f"{stock1.upper()} → {s1}/10\n"
-    msg += f"{stock2.upper()} → {s2}/10\n\n"
-    msg += f"🏆 Winner: {winner}"
+    msg = f"{stock1.upper()} → {s1}/10\n{stock2.upper()} → {s2}/10\n\n🏆 {winner}"
 
-    await interaction.followup.send(msg)
+    embed = discord.Embed(
+        title="⚔️ STOCK COMPARISON",
+        description=msg,
+        color=0x9b59b6
+    )
+
+    await interaction.followup.send(embed=embed)
 
 
-# ---------------- BACKGROUND BREAKOUT ALERT LOOP ----------------
-async def breakout_loop():
+# ---------------- LIVE ALERT LOOP ----------------
+ALERT_CHANNEL_ID = None  # PUT YOUR CHANNEL ID HERE
+
+async def alert_loop():
     await client.wait_until_ready()
 
-    channel_id = None  # optional: put your Discord channel ID here
-
     while not client.is_closed():
+
         try:
-            results = []
+            alerts = []
 
             for s in stocks[:20]:
                 sc, label, _, _ = await safe_score(s)
                 if sc >= 9:
-                    results.append((s, sc))
+                    alerts.append((s, sc))
 
-            if channel_id:
-                channel = client.get_channel(channel_id)
+            if ALERT_CHANNEL_ID and alerts:
+                channel = client.get_channel(ALERT_CHANNEL_ID)
 
-                if channel and results:
+                if channel:
                     msg = "🚨 **LIVE BREAKOUT ALERT**\n\n"
-                    for r in results:
-                        msg += f"{r[0]} → {r[1]}/10\n"
+                    for a in alerts:
+                        msg += f"{a[0]} → {a[1]}/10\n"
+
                     await channel.send(msg)
 
         except:
             pass
 
-        await asyncio.sleep(300)  # every 5 min
+        await asyncio.sleep(300)
 
 
-# ---------------- KEEP ALIVE LOOP ----------------
+# ---------------- KEEP ALIVE ----------------
 async def heartbeat():
     await client.wait_until_ready()
 
@@ -251,7 +285,7 @@ async def heartbeat():
         await asyncio.sleep(60)
 
 
-# ---------------- WAKE COMMAND ----------------
+# ---------------- WAKE ----------------
 @tree.command(name="wake")
 async def wake(interaction: discord.Interaction):
 
@@ -269,21 +303,15 @@ async def wake(interaction: discord.Interaction):
 # ---------------- READY ----------------
 @client.event
 async def on_ready():
-    try:
-        await tree.sync()
-        print("Slash commands synced")
-    except:
-        print("Sync failed")
-
-    print("PRO TRADING BOT ONLINE")
+    await tree.sync()
+    print("PRO TRADING SYSTEM V4 ONLINE")
 
 
-# ---------------- START BOT + TASKS ----------------
+# ---------------- RUN ----------------
 async def main():
     async with client:
-        client.loop.create_task(breakout_loop())
+        client.loop.create_task(alert_loop())
         client.loop.create_task(heartbeat())
         await client.start(TOKEN)
-
 
 asyncio.run(main())
