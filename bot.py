@@ -4,6 +4,10 @@ from discord.ext import commands
 import json
 import requests
 
+import matplotlib.pyplot as plt
+import pandas as pd
+from io import BytesIO
+
 # =========================
 # TOKEN
 # =========================
@@ -14,7 +18,7 @@ if not TOKEN:
     exit()
 
 # =========================
-# ALPACA CONFIG
+# ALPACA (FREE DATA)
 # =========================
 ALPACA_KEY = os.getenv("ALPACA_KEY")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET")
@@ -53,7 +57,7 @@ def user(uid):
     return memory[uid]
 
 # =========================
-# FETCH 1m DATA (ALPACA)
+# MARKET DATA (1M)
 # =========================
 def get_data(symbol, timeframe="1Min"):
     try:
@@ -65,11 +69,11 @@ def get_data(symbol, timeframe="1Min"):
         if not bars:
             return None
 
-        closes = [b["c"] for b in bars]
-        highs = [b["h"] for b in bars]
-        volumes = [b["v"] for b in bars]
+        close = [b["c"] for b in bars]
+        high = [b["h"] for b in bars]
+        vol = [b["v"] for b in bars]
 
-        return closes, highs, volumes
+        return close, high, vol
 
     except:
         return None
@@ -93,10 +97,8 @@ def analyze(symbol, mode="swing"):
     breakout = price > resistance
     rejection = high[-1] >= resistance and close[-1] < resistance
 
-    retest = False
-    if len(close) > 10:
-        broke = max(close[-10:]) > resistance
-        retest = broke and abs(price - resistance) / resistance < 0.005
+    broke_before = max(close[-10:]) > resistance
+    retest = broke_before and abs(price - resistance) / resistance < 0.005
 
     vol_spike = vol[-1] > (sum(vol[-20:]) / 20) * 1.8
 
@@ -105,51 +107,33 @@ def analyze(symbol, mode="swing"):
     score = 0
 
     # =========================
-    # MODE SYSTEM (1 MIN TRADING)
+    # MODE SYSTEM
     # =========================
-
     if mode == "scalp":
-        breakout_w = 50
-        retest_w = 40
-        reject_w = -50
-
+        breakout_w, retest_w, reject_w = 50, 40, -50
     elif mode == "daytrade":
-        breakout_w = 60
-        retest_w = 50
-        reject_w = -40
-
-    elif mode == "swing":
-        breakout_w = 65
-        retest_w = 55
-        reject_w = -35
-
+        breakout_w, retest_w, reject_w = 60, 50, -40
+    elif mode == "smc":
+        breakout_w, retest_w, reject_w = 30, 60, -35
+    elif mode == "investor":
+        breakout_w, retest_w, reject_w = 70, 30, -25
     else:
-        breakout_w = 50
-        retest_w = 45
-        reject_w = -30
+        breakout_w, retest_w, reject_w = 60, 50, -30
 
     # =========================
     # SIGNALS
     # =========================
-
     if breakout:
         score += breakout_w
-
     if retest:
         score += retest_w
-
     if rejection:
         score += reject_w
-
     if vol_spike:
         score += 30
-
     if change > 0.5:
         score += 15
 
-    # =========================
-    # LABEL
-    # =========================
     if score >= 80:
         label = "🚀 STRONG BREAKOUT"
     elif score >= 55:
@@ -168,10 +152,41 @@ def analyze(symbol, mode="swing"):
         "retest": retest,
         "rejection": rejection,
         "volume_spike": vol_spike,
-        "change": round(change, 2),
         "score": score,
         "label": label
     }
+
+# =========================
+# CHART SYSTEM (NEW)
+# =========================
+def make_chart(symbol, timeframe="1Min"):
+    data = get_data(symbol, timeframe)
+
+    if not data:
+        return None
+
+    close, high, vol = data
+
+    df = pd.DataFrame({"close": close})
+
+    plt.figure(figsize=(10,4))
+    plt.plot(df["close"], label="Price")
+
+    resistance = max(close)
+    support = min(close)
+
+    plt.axhline(resistance, color="red", linestyle="--", label="Resistance")
+    plt.axhline(support, color="green", linestyle="--", label="Support")
+
+    plt.title(f"{symbol} {timeframe}")
+    plt.legend()
+
+    buf = BytesIO()
+    plt.savefig(buf, format="png")
+    buf.seek(0)
+    plt.close()
+
+    return buf
 
 # =========================
 # BOT
@@ -203,7 +218,7 @@ async def rate(i: discord.Interaction, ticker: str):
     save(memory)
 
     await i.response.send_message(
-        f"📊 {ticker.upper()}\n"
+        f"📊 {ticker}\n"
         f"{d['label']}\n\n"
         f"Price: {d['price']}\n"
         f"Resistance: {d['resistance']}\n"
@@ -229,20 +244,36 @@ async def scan(i: discord.Interaction):
 
     await i.followup.send("\n".join(out))
 
-@bot.tree.command(name="modes")
-async def modes(i: discord.Interaction):
-    await i.response.send_message(
-        "swing - normal trades\n"
-        "daytrade - intraday setups (5m-1m)\n"
-        "scalp - fast moves (1m)\n"
-    )
+@bot.tree.command(name="movers")
+async def movers(i: discord.Interaction):
+    await i.response.defer()
 
+    u = user(str(i.user.id))
+    tickers = ["AAPL","TSLA","NVDA","MSFT","AMZN"]
+
+    ranked = []
+    for t in tickers:
+        d = analyze(t, u["mode"])
+        if d:
+            ranked.append((t, d["score"]))
+
+    ranked.sort(reverse=True, key=lambda x: x[1])
+
+    msg = "📈 MOVERS\n\n"
+    for t, s in ranked:
+        msg += f"{t}: {s}\n"
+
+    await i.followup.send(msg)
+
+# =========================
+# MODE SYSTEM
+# =========================
 @bot.tree.command(name="setmode")
 async def setmode(i: discord.Interaction, mode: str):
     u = user(str(i.user.id))
-
     mode = mode.lower()
-    if mode not in ["swing","daytrade","scalp"]:
+
+    if mode not in ["swing","daytrade","scalp","smc","investor"]:
         await i.response.send_message("Invalid mode")
         return
 
@@ -251,13 +282,48 @@ async def setmode(i: discord.Interaction, mode: str):
 
     await i.response.send_message(f"Mode set to {mode}")
 
+@bot.tree.command(name="modes")
+async def modes(i: discord.Interaction):
+    await i.response.send_message(
+        "swing - normal\n"
+        "daytrade - intraday\n"
+        "scalp - fast moves\n"
+        "smc - smart money concepts\n"
+        "investor - long term"
+    )
+
+# =========================
+# CHART COMMAND (NEW)
+# =========================
+@bot.tree.command(name="chart")
+async def chart(i: discord.Interaction, ticker: str, timeframe: str = "1Min"):
+    await i.response.defer()
+
+    img = make_chart(ticker.upper(), timeframe)
+
+    if not img:
+        await i.followup.send("❌ No data")
+        return
+
+    file = discord.File(img, filename="chart.png")
+
+    await i.followup.send(
+        content=f"📊 {ticker.upper()} {timeframe}",
+        file=file
+    )
+
+# =========================
+# HELP
+# =========================
 @bot.tree.command(name="help")
 async def help(i: discord.Interaction):
     await i.response.send_message(
-        "/rate ticker\n"
+        "/rate\n"
         "/scan\n"
+        "/movers\n"
+        "/chart\n"
+        "/setmode\n"
         "/modes\n"
-        "/setmode swing/daytrade/scalp\n"
         "/help"
     )
 
