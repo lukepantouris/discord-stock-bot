@@ -1,6 +1,6 @@
-discord.py==2.7.1
+discord.py
 yfinance
 pandas
 numpy
 aiohttp
-flask
+matplotlib
