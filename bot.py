@@ -1,291 +1,174 @@
 import os
 import discord
-from discord.ext import commands
-import json
+from discord import app_commands
 import requests
-import matplotlib.pyplot as plt
-from io import BytesIO
 
 # =========================
-# SAFE ENV LOAD (NO CRASH)
+# KEYS
 # =========================
-TOKEN = os.getenv("DISCORD_TOKEN")
+
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 ALPACA_KEY = os.getenv("ALPACA_KEY")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET")
 
-if not TOKEN:
-    raise Exception("DISCORD_TOKEN missing in Railway")
+if not DISCORD_TOKEN:
+    raise Exception("Missing DISCORD_TOKEN")
 
-# 🔥 DO NOT CRASH BOT IF ALPACA MISSING
-ALPACA_ENABLED = True
 if not ALPACA_KEY or not ALPACA_SECRET:
     print("WARNING: Alpaca keys missing → trading disabled")
-    ALPACA_ENABLED = False
 
 BASE_URL = "https://data.alpaca.markets/v2"
 
-headers = {}
-if ALPACA_ENABLED:
-    headers = {
-        "APCA-API-KEY-ID": ALPACA_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_SECRET
-    }
+headers = {
+    "APCA-API-KEY-ID": ALPACA_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_SECRET
+}
+
 
 # =========================
-# MEMORY SYSTEM
+# BOT SETUP
 # =========================
-FILE = "memory.json"
 
-def load():
-    try:
-        return json.load(open(FILE))
-    except:
-        return {}
+intents = discord.Intents.default()
+bot = discord.Client(intents=intents)
+tree = app_commands.CommandTree(bot)
 
-def save(d):
-    json.dump(d, open(FILE, "w"), indent=4)
-
-memory = load()
-
-def user(uid):
-    if uid not in memory:
-        memory[uid] = {
-            "mode": "swing",
-            "risk": "C"
-        }
-    return memory[uid]
 
 # =========================
-# SAFE ALPACA DATA ENGINE
+# HELP COMMAND
 # =========================
+
+@tree.command(name="help")
+async def help_cmd(i: discord.Interaction):
+    msg = (
+        "**Commands**\n"
+        "/scan - scans stocks\n"
+        "/movers - top movers\n"
+        "/rate - analyze stock\n"
+    )
+    await i.response.send_message(msg)
+
+
+# =========================
+# DATA FETCHER (FIXED)
+# =========================
+
 def get_data(symbol, timeframe="1Min"):
-    if not ALPACA_ENABLED:
-        print("ALPACA DISABLED")
-        return None
-
     try:
         url = f"{BASE_URL}/stocks/{symbol}/bars"
 
         params = {
             "timeframe": timeframe,
-            "limit": 50,
+            "limit": 100,
             "feed": "iex",
-            "adjustment": "raw",
-            "extended_hours": True
+            "adjustment": "raw"
         }
 
         r = requests.get(url, headers=headers, params=params, timeout=10)
 
         if r.status_code != 200:
-            print("ALPACA ERROR:", r.status_code, r.text)
-            return None
+            return fallback(symbol)
 
-        try:
-            data = r.json()
-        except:
-            print("NON JSON RESPONSE:", r.text)
-            return None
-
+        data = r.json()
         bars = data.get("bars", [])
 
-        # =========================
-        # FALLBACK LOGIC
-        # =========================
         if not bars:
-            print("NO 1MIN DATA → TRY 1DAY")
+            return fallback(symbol)
 
-            params["timeframe"] = "1Day"
+        return clean(bars)
+
+    except:
+        return fallback(symbol)
+
+
+def fallback(symbol):
+    try:
+        url = f"{BASE_URL}/stocks/{symbol}/bars"
+
+        for tf in ["5Min", "1Day"]:
+            params = {
+                "timeframe": tf,
+                "limit": 100,
+                "feed": "iex",
+                "adjustment": "raw"
+            }
 
             r = requests.get(url, headers=headers, params=params, timeout=10)
 
-            if r.status_code != 200:
-                return None
-
-            try:
+            if r.status_code == 200:
                 data = r.json()
-            except:
-                return None
+                bars = data.get("bars", [])
 
-            bars = data.get("bars", [])
+                if bars:
+                    return clean(bars)
 
-            if not bars:
-                return None
-
-        close = [b["c"] for b in bars]
-        high = [b["h"] for b in bars]
-        vol = [b["v"] for b in bars]
-
-        return close, high, vol
-
-    except Exception as e:
-        print("DATA ERROR:", e)
         return None
 
-# =========================
-# ANALYSIS ENGINE
-# =========================
-def analyze(symbol, mode="swing"):
-    data = get_data(symbol, "1Min")
-
-    if not data:
+    except:
         return None
 
-    close, high, vol = data
 
-    price = close[-1]
-    resistance = max(close[-20:])
-    support = min(close[-20:])
+def clean(bars):
+    close, high, low, volume = [], [], [], []
 
-    breakout = price > resistance
-    rejection = high[-1] >= resistance and close[-1] < resistance
+    for b in bars:
+        if None in (b.get("c"), b.get("h"), b.get("l"), b.get("v")):
+            continue
 
-    retest = abs(price - resistance) / resistance < 0.005 if resistance else False
+        close.append(b["c"])
+        high.append(b["h"])
+        low.append(b["l"])
+        volume.append(b["v"])
 
-    vol_spike = False
-    if len(vol) > 20:
-        vol_spike = vol[-1] > sum(vol[-20:]) / 20 * 1.8
-
-    change = ((close[-1] - close[-5]) / close[-5]) * 100 if len(close) > 5 else 0
-
-    score = 0
-
-    if breakout:
-        score += 60
-    if retest:
-        score += 35
-    if rejection:
-        score -= 25
-    if vol_spike:
-        score += 25
-    if change > 0.5:
-        score += 15
-
-    if score >= 80:
-        label = "🚀 STRONG BREAKOUT"
-    elif score >= 55:
-        label = "🔥 GOOD SETUP"
-    elif score >= 30:
-        label = "👀 WATCH"
-    else:
-        label = "❌ WEAK"
-
-    return {
-        "symbol": symbol,
-        "price": price,
-        "resistance": resistance,
-        "support": support,
-        "score": score,
-        "label": label
-    }
-
-# =========================
-# CHARTS
-# =========================
-def make_chart(symbol):
-    data = get_data(symbol, "1Min")
-
-    if not data:
+    if len(close) < 5:
         return None
 
-    close, high, vol = data
+    return close, high, low, volume
 
-    plt.figure(figsize=(10,4))
-    plt.plot(close)
-
-    plt.axhline(max(close), linestyle="--", color="red")
-    plt.axhline(min(close), linestyle="--", color="green")
-
-    plt.title(symbol)
-
-    buf = BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    plt.close()
-
-    return buf
 
 # =========================
-# DISCORD BOT
-# =========================
-class Bot(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=discord.Intents.default())
-
-    async def setup_hook(self):
-        await self.tree.sync()
-        print("Slash commands synced")
-
-bot = Bot()
-
-# =========================
-# COMMANDS
+# SCAN COMMAND (FIXED NO EMPTY MESSAGE)
 # =========================
 
-@bot.tree.command(name="rate")
-async def rate(i: discord.Interaction, ticker: str):
-    u = user(str(i.user.id))
-
-    d = analyze(ticker.upper(), u["mode"])
-
-    if not d:
-        await i.response.send_message("❌ No data available (market closed or Alpaca issue)")
-        return
-
-    await i.response.send_message(
-        f"📊 {ticker}\n{d['label']}\n"
-        f"Price: {d['price']}\nScore: {d['score']}"
-    )
-
-@bot.tree.command(name="scan")
+@tree.command(name="scan")
 async def scan(i: discord.Interaction):
-    await i.response.defer()
+    await i.response.defer(thinking=True)
 
-    u = user(str(i.user.id))
-    tickers = ["AAPL","TSLA","NVDA","MSFT","AMZN"]
-
+    tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
     out = []
 
     for t in tickers:
-        d = analyze(t, u["mode"])
-        if d:
-            out.append(f"{t}: {d['label']} ({d['score']})")
+        data = get_data(t)
 
-    # 🔥 FIX: never empty Discord message
+        if not data:
+            continue
+
+        close, high, low, vol = data
+
+        change = ((close[-1] - close[0]) / close[0]) * 100
+
+        label = "STRONG" if abs(change) > 2 else "WEAK"
+
+        out.append(f"{t}: {label} ({change:.2f}%)")
+
     if not out:
-        await i.followup.send("❌ No market data available")
-        return
+        out = ["No market data available right now"]
 
     await i.followup.send("\n".join(out))
 
-@bot.tree.command(name="chart")
-async def chart(i: discord.Interaction, ticker: str):
-    await i.response.defer()
-
-    img = make_chart(ticker.upper())
-
-    if not img:
-        await i.followup.send("❌ No chart data available")
-        return
-
-    file = discord.File(img, filename="chart.png")
-    await i.followup.send(file=file)
-
-@bot.tree.command(name="help")
-async def help(i: discord.Interaction):
-    await i.response.send_message(
-        "/rate - analyze stock\n"
-        "/scan - scan market\n"
-        "/chart - show chart\n"
-        "/modes - trading modes\n"
-    )
-
-@bot.tree.command(name="modes")
-async def modes(i: discord.Interaction):
-    await i.response.send_message(
-        "modes: swing | daytrade | scalp"
-    )
 
 # =========================
-# RUN
+# ON READY
 # =========================
-bot.run(TOKEN)
+
+@bot.event
+async def on_ready():
+    await tree.sync()
+    print("Slash commands synced")
+
+
+# =========================
+# RUN BOT
+# =========================
+
+bot.run(DISCORD_TOKEN)
