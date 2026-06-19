@@ -1,4 +1,8 @@
 import os
+
+print("ALPACA_KEY =", os.getenv("ALPACA_KEY"))
+print("ALPACA_SECRET =", os.getenv("ALPACA_SECRET"))
+print("DISCORD_TOKEN =", os.getenv("DISCORD_TOKEN"))
 import discord
 from discord.ext import commands
 import json
