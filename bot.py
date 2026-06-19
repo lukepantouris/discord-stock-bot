@@ -1,200 +1,212 @@
+import os
 import discord
+from discord.ext import commands
 from discord import app_commands
 import yfinance as yf
-import os
-import asyncio
+import json
 
-TOKEN = os.getenv("TOKEN")
+# =========================
+# TOKEN
+# =========================
+TOKEN = os.getenv("DISCORD_TOKEN")
 
-intents = discord.Intents.default()
-client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
+if not TOKEN:
+    print("TOKEN NOT FOUND")
+    exit()
 
-# ---------------- STOCK LIST ----------------
-stocks = [
-    "AAPL","MSFT","AMZN","NVDA","TSLA","META","GOOGL","NFLX","AMD","INTC",
-    "PLTR","COIN","JPM","BAC","WMT","COST","DIS","TSM","AVGO","PYPL",
-    "SQ","HOOD","MARA","RIOT","SOFI","NIO","RIVN","LCID","ORCL","IBM"
-]
+# =========================
+# MEMORY SYSTEM
+# =========================
+MEMORY_FILE = "memory.json"
 
-# ---------------- STOCK DATA ----------------
-def get_stock(ticker):
+def load_memory():
     try:
-        data = yf.Ticker(ticker).history(period="5d")
+        with open(MEMORY_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {}
 
-        if data is None or data.empty:
+def save_memory(data):
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+memory = load_memory()
+
+def get_user(user_id):
+    if user_id not in memory:
+        memory[user_id] = {
+            "watchlist": [],
+            "mode": "C",
+            "alerts": []
+        }
+    return memory[user_id]
+
+# =========================
+# BOT CLASS (SLASH COMMANDS)
+# =========================
+class StockBot(commands.Bot):
+    def __init__(self):
+        intents = discord.Intents.default()
+        intents.message_content = True
+
+        super().__init__(command_prefix="!", intents=intents)
+
+        self.tree = app_commands.CommandTree(self)
+
+    async def setup_hook(self):
+        await self.tree.sync()
+        print("Slash commands synced")
+
+bot = StockBot()
+
+# =========================
+# STOCK ANALYSIS ENGINE
+# =========================
+def analyze_stock(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="7d")
+
+        if hist.empty:
             return None
 
-        close = data["Close"]
+        closes = hist["Close"]
 
-        price = float(close.iloc[-1])
-        prev = float(close.iloc[-2]) if len(close) > 1 else price
+        change = ((closes.iloc[-1] - closes.iloc[0]) / closes.iloc[0]) * 100
+        momentum = (closes.iloc[-1] - closes.iloc[-3]) / closes.iloc[-3] * 100
 
-        change = (price - prev) / prev if prev != 0 else 0
+        score = (change * 2) + (momentum * 1.5)
 
-        return price, change
+        if score >= 20:
+            label = "🚀 BREAKOUT"
+        elif score >= 10:
+            label = "🔥 STRONG"
+        elif score >= 0:
+            label = "👀 NEUTRAL"
+        else:
+            label = "❌ WEAK"
+
+        return {
+            "ticker": ticker.upper(),
+            "change": round(change, 2),
+            "momentum": round(momentum, 2),
+            "score": round(score, 2),
+            "label": label
+        }
 
     except:
         return None
 
+# =========================
+# SLASH COMMANDS
+# =========================
 
-# ---------------- SCORE SYSTEM ----------------
-def score_stock(ticker):
-    data = get_stock(ticker)
+@bot.tree.command(name="status", description="Check bot status")
+async def status(interaction: discord.Interaction):
+    await interaction.response.send_message("🟢 Bot is online")
+
+# -------------------------
+
+@bot.tree.command(name="rate", description="Analyze a stock")
+async def rate(interaction: discord.Interaction, ticker: str):
+
+    data = analyze_stock(ticker)
 
     if not data:
-        return 0, "NO DATA", []
+        await interaction.response.send_message("❌ Stock not found")
+        return
 
-    price, change = data
+    await interaction.response.send_message(
+        f"""
+📊 **{data['ticker']}**
 
-    score = 50
-    reasons = []
+Signal: {data['label']}
+Score: {data['score']}
+Change: {data['change']}%
+Momentum: {data['momentum']}%
+"""
+    )
 
-    # momentum logic
-    if change > 0.05:
-        score += 25
-        reasons.append("Strong upward momentum")
-    elif change < -0.05:
-        score -= 25
-        reasons.append("Heavy selling pressure")
+# -------------------------
 
-    score = max(0, min(100, score))
-
-    # ✅ FIXED LABEL LOGIC (NO CRASH)
-    if score >= 85:
-        label = "🚀 BREAKOUT"
-    elif score >= 70:
-        label = "🔥 STRONG"
-    elif score >= 50:
-        label = "👀 NEUTRAL"
-    else:
-        label = "❌ WEAK"
-
-    return score, label, reasons
-
-
-# ---------------- SAFE EXECUTION ----------------
-async def run_blocking(func, *args):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, func, *args)
-
-
-# ---------------- RATE COMMAND ----------------
-@tree.command(name="rate")
-async def rate(interaction: discord.Interaction, ticker: str):
-    await interaction.response.defer()
-
-    score, label, reasons = await run_blocking(score_stock, ticker.upper())
-
-    msg = f"📊 **{ticker.upper()}**\n{label} → {score}/100\n\n"
-
-    for r in reasons:
-        msg += f"• {r}\n"
-
-    await interaction.followup.send(msg)
-
-
-# ---------------- SCAN ----------------
-@tree.command(name="scan")
+@bot.tree.command(name="scan", description="Scan market movers")
 async def scan(interaction: discord.Interaction):
-    await interaction.response.defer()
+
+    tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
 
     results = []
 
-    for s in stocks:
-        score, label, _ = await run_blocking(score_stock, s)
-        results.append((s, score, label))
+    for t in tickers:
+        data = analyze_stock(t)
+        if data:
+            results.append(f"{t}: {data['label']} ({data['score']})")
 
-    results.sort(key=lambda x: x[1], reverse=True)
+    await interaction.response.send_message("\n".join(results))
 
-    msg = "📊 **MARKET SCAN**\n\n"
+# -------------------------
 
-    for r in results[:10]:
-        msg += f"{r[0]} → {r[1]}/100 {r[2]}\n"
+@bot.tree.command(name="movers", description="Rank top movers")
+async def movers(interaction: discord.Interaction):
 
-    await interaction.followup.send(msg)
+    tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
 
+    ranked = []
 
-# ---------------- BREAKOUTS ----------------
-@tree.command(name="breakouts")
-async def breakouts(interaction: discord.Interaction):
-    await interaction.response.defer()
+    for t in tickers:
+        data = analyze_stock(t)
+        if data:
+            ranked.append((t, data["score"]))
 
-    found = []
+    ranked.sort(key=lambda x: x[1], reverse=True)
 
-    for s in stocks:
-        score, label, _ = await run_blocking(score_stock, s)
-        if score >= 85:
-            found.append((s, score))
+    msg = "📈 TOP MOVERS\n\n"
+    for t, s in ranked:
+        msg += f"{t}: {round(s,2)}\n"
 
-    if not found:
-        await interaction.followup.send("No breakouts right now.")
+    await interaction.response.send_message(msg)
+
+# -------------------------
+
+@bot.tree.command(name="watch", description="Add stock to watchlist")
+async def watch(interaction: discord.Interaction, ticker: str):
+
+    user = str(interaction.user.id)
+    data = get_user(user)
+
+    data["watchlist"].append(ticker.upper())
+    save_memory(memory)
+
+    await interaction.response.send_message(f"Added {ticker.upper()} to watchlist")
+
+# -------------------------
+
+@bot.tree.command(name="mylist", description="Show watchlist")
+async def mylist(interaction: discord.Interaction):
+
+    user = str(interaction.user.id)
+    data = get_user(user)
+
+    await interaction.response.send_message(f"Watchlist: {data['watchlist']}")
+
+# -------------------------
+
+@bot.tree.command(name="setmode", description="Set mode A/B/C")
+async def setmode(interaction: discord.Interaction, mode: str):
+
+    user = str(interaction.user.id)
+    data = get_user(user)
+
+    if mode.upper() not in ["A", "B", "C"]:
+        await interaction.response.send_message("Use A, B, or C")
         return
 
-    msg = "🚨 **BREAKOUT ALERTS**\n\n"
+    data["mode"] = mode.upper()
+    save_memory(memory)
 
-    for f in found:
-        msg += f"{f[0]} → {f[1]}/100\n"
+    await interaction.response.send_message(f"Mode set to {mode.upper()}")
 
-    await interaction.followup.send(msg)
+# =========================
+# RUN BOT
+# =========================
 
-
-# ---------------- NEWS (simple sentiment) ----------------
-@tree.command(name="news")
-async def news(interaction: discord.Interaction, ticker: str):
-    await interaction.response.defer()
-
-    score, label, _ = await run_blocking(score_stock, ticker.upper())
-
-    sentiment = "bullish 📈" if score > 70 else "neutral ⚖️" if score > 50 else "bearish 📉"
-
-    await interaction.followup.send(
-        f"📰 **{ticker.upper()} NEWS VIEW**\n"
-        f"Sentiment: {sentiment}\n"
-        f"Rating: {label}"
-    )
-
-
-# ---------------- STATUS ----------------
-@tree.command(name="status")
-async def status(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    await interaction.followup.send(
-        "🟢 BOT STATUS\n\n"
-        f"Latency: {round(client.latency * 1000, 2)}ms\n"
-        f"Tracked Stocks: {len(stocks)}\n"
-        "System: Online"
-    )
-
-
-# ---------------- WAKE ----------------
-@tree.command(name="wake")
-async def wake(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    synced = await tree.sync()
-
-    await interaction.followup.send(f"🟢 Awake | Synced {len(synced)} commands")
-
-
-# ---------------- READY ----------------
-@client.event
-async def on_ready():
-    try:
-        await tree.sync()
-        print("BOT ONLINE")
-    except Exception as e:
-        print("SYNC ERROR:", e)
-
-
-# ---------------- START ----------------
-async def main():
-    if not TOKEN:
-        print("TOKEN NOT FOUND")
-        return
-
-    await client.start(TOKEN)
-
-
-asyncio.run(main())
+bot.run(TOKEN)
