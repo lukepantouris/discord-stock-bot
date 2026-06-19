@@ -17,21 +17,20 @@ stocks = [
     "SQ","HOOD","MARA","RIOT","SOFI","NIO","RIVN","LCID","ORCL","IBM"
 ]
 
-# ---------------- FETCH STOCK ----------------
+# ---------------- STOCK DATA ----------------
 def get_stock(ticker):
     try:
-        t = yf.Ticker(ticker)
-        h = t.history(period="5d")
+        data = yf.Ticker(ticker).history(period="5d")
 
-        if h is None or h.empty:
+        if data is None or data.empty:
             return None
 
-        close = h["Close"]
+        close = data["Close"]
 
-        price = close.iloc[-1]
-        prev = close.iloc[-2] if len(close) > 1 else price
+        price = float(close.iloc[-1])
+        prev = float(close.iloc[-2]) if len(close) > 1 else price
 
-        change = (price - prev) / prev if prev else 0
+        change = (price - prev) / prev if prev != 0 else 0
 
         return price, change
 
@@ -41,26 +40,27 @@ def get_stock(ticker):
 
 # ---------------- SCORE SYSTEM ----------------
 def score_stock(ticker):
-    d = get_stock(ticker)
+    data = get_stock(ticker)
 
-    if not d:
+    if not data:
         return 0, "NO DATA", []
 
-    price, change = d
+    price, change = data
 
     score = 50
     reasons = []
 
+    # momentum logic
     if change > 0.05:
         score += 25
-        reasons.append("Strong momentum")
+        reasons.append("Strong upward momentum")
     elif change < -0.05:
         score -= 25
-        reasons.append("Sell pressure")
+        reasons.append("Heavy selling pressure")
 
     score = max(0, min(100, score))
 
-    # ✅ FIXED LABEL LOGIC
+    # ✅ FIXED LABEL LOGIC (NO CRASH)
     if score >= 85:
         label = "🚀 BREAKOUT"
     elif score >= 70:
@@ -73,23 +73,23 @@ def score_stock(ticker):
     return score, label, reasons
 
 
-async def safe_run(func, *args):
+# ---------------- SAFE EXECUTION ----------------
+async def run_blocking(func, *args):
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, func, *args)
 
 
-# ---------------- RATE ----------------
+# ---------------- RATE COMMAND ----------------
 @tree.command(name="rate")
 async def rate(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
 
-    score, label, reasons = await safe_run(score_stock, ticker.upper())
+    score, label, reasons = await run_blocking(score_stock, ticker.upper())
 
-    msg = f"📊 {ticker.upper()}\n{label} → {score}/100\n\n"
+    msg = f"📊 **{ticker.upper()}**\n{label} → {score}/100\n\n"
 
-    if reasons:
-        for r in reasons:
-            msg += f"• {r}\n"
+    for r in reasons:
+        msg += f"• {r}\n"
 
     await interaction.followup.send(msg)
 
@@ -102,12 +102,12 @@ async def scan(interaction: discord.Interaction):
     results = []
 
     for s in stocks:
-        score, label, _ = await safe_run(score_stock, s)
+        score, label, _ = await run_blocking(score_stock, s)
         results.append((s, score, label))
 
     results.sort(key=lambda x: x[1], reverse=True)
 
-    msg = "📊 MARKET SCAN\n\n"
+    msg = "📊 **MARKET SCAN**\n\n"
 
     for r in results[:10]:
         msg += f"{r[0]} → {r[1]}/100 {r[2]}\n"
@@ -123,7 +123,7 @@ async def breakouts(interaction: discord.Interaction):
     found = []
 
     for s in stocks:
-        score, label, _ = await safe_run(score_stock, s)
+        score, label, _ = await run_blocking(score_stock, s)
         if score >= 85:
             found.append((s, score))
 
@@ -131,7 +131,7 @@ async def breakouts(interaction: discord.Interaction):
         await interaction.followup.send("No breakouts right now.")
         return
 
-    msg = "🚨 BREAKOUTS\n\n"
+    msg = "🚨 **BREAKOUT ALERTS**\n\n"
 
     for f in found:
         msg += f"{f[0]} → {f[1]}/100\n"
@@ -139,18 +139,20 @@ async def breakouts(interaction: discord.Interaction):
     await interaction.followup.send(msg)
 
 
-# ---------------- NEWS (SIMPLE SENTIMENT) ----------------
+# ---------------- NEWS (simple sentiment) ----------------
 @tree.command(name="news")
 async def news(interaction: discord.Interaction, ticker: str):
     await interaction.response.defer()
 
-    score, label, _ = await safe_run(score_stock, ticker.upper())
+    score, label, _ = await run_blocking(score_stock, ticker.upper())
 
-    sentiment = "bullish" if score > 70 else "neutral" if score > 50 else "bearish"
+    sentiment = "bullish 📈" if score > 70 else "neutral ⚖️" if score > 50 else "bearish 📉"
 
-    msg = f"📰 {ticker.upper()}\nSentiment: {sentiment}\nRating: {label}"
-
-    await interaction.followup.send(msg)
+    await interaction.followup.send(
+        f"📰 **{ticker.upper()} NEWS VIEW**\n"
+        f"Sentiment: {sentiment}\n"
+        f"Rating: {label}"
+    )
 
 
 # ---------------- STATUS ----------------
@@ -158,14 +160,12 @@ async def news(interaction: discord.Interaction, ticker: str):
 async def status(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    msg = (
-        "🧠 BOT STATUS\n\n"
-        f"Latency: {round(client.latency*1000,2)}ms\n"
+    await interaction.followup.send(
+        "🟢 BOT STATUS\n\n"
+        f"Latency: {round(client.latency * 1000, 2)}ms\n"
         f"Tracked Stocks: {len(stocks)}\n"
         "System: Online"
     )
-
-    await interaction.followup.send(msg)
 
 
 # ---------------- WAKE ----------------
@@ -175,18 +175,26 @@ async def wake(interaction: discord.Interaction):
 
     synced = await tree.sync()
 
-    await interaction.followup.send(f"🟢 Awake\nSynced {len(synced)} commands")
+    await interaction.followup.send(f"🟢 Awake | Synced {len(synced)} commands")
 
 
 # ---------------- READY ----------------
 @client.event
 async def on_ready():
-    await tree.sync()
-    print("BOT ONLINE")
+    try:
+        await tree.sync()
+        print("BOT ONLINE")
+    except Exception as e:
+        print("SYNC ERROR:", e)
 
 
 # ---------------- START ----------------
 async def main():
+    if not TOKEN:
+        print("TOKEN NOT FOUND")
+        return
+
     await client.start(TOKEN)
+
 
 asyncio.run(main())
