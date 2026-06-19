@@ -15,7 +15,7 @@ if not TOKEN:
     exit()
 
 # =========================
-# MEMORY SYSTEM
+# MEMORY
 # =========================
 MEMORY_FILE = "memory.json"
 
@@ -42,7 +42,7 @@ def get_user(user_id):
     return memory[user_id]
 
 # =========================
-# BOT CLASS (FIXED)
+# BOT
 # =========================
 class StockBot(commands.Bot):
     def __init__(self):
@@ -61,20 +61,20 @@ class StockBot(commands.Bot):
 bot = StockBot()
 
 # =========================
-# STOCK ANALYSIS
+# STOCK ANALYSIS (FIXED)
 # =========================
 def analyze_stock(ticker):
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="7d")
 
-        if hist.empty:
+        closes = hist["Close"].dropna()
+
+        if len(closes) < 3:
             return None
 
-        closes = hist["Close"]
-
         change = ((closes.iloc[-1] - closes.iloc[0]) / closes.iloc[0]) * 100
-        momentum = (closes.iloc[-1] - closes.iloc[-3]) / closes.iloc[-3] * 100
+        momentum = ((closes.iloc[-1] - closes.iloc[-3]) / closes.iloc[-3]) * 100
 
         score = (change * 2) + (momentum * 1.5)
 
@@ -99,48 +99,50 @@ def analyze_stock(ticker):
         return None
 
 # =========================
-# SLASH COMMANDS
+# COMMANDS
 # =========================
 
-@bot.tree.command(name="status", description="Check bot status")
+@bot.tree.command(name="status")
 async def status(interaction: discord.Interaction):
-    await interaction.response.send_message("🟢 Bot is online")
+    await interaction.response.send_message("🟢 Bot online")
 
-@bot.tree.command(name="rate", description="Analyze a stock")
+@bot.tree.command(name="rate")
 async def rate(interaction: discord.Interaction, ticker: str):
     data = analyze_stock(ticker)
 
     if not data:
-        await interaction.response.send_message("❌ Stock not found")
+        await interaction.response.send_message("❌ No data")
         return
 
     await interaction.response.send_message(
-        f"📊 {data['ticker']}\nSignal: {data['label']}\nScore: {data['score']}\nChange: {data['change']}%\nMomentum: {data['momentum']}%"
+        f"{data['ticker']}\n{data['label']}\nScore: {data['score']}\nChange: {data['change']}%\nMomentum: {data['momentum']}%"
     )
 
-@bot.tree.command(name="scan", description="Scan market movers")
+@bot.tree.command(name="scan")
 async def scan(interaction: discord.Interaction):
+    await interaction.response.defer()
+
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
 
-    results = []
-
+    out = []
     for t in tickers:
-        data = analyze_stock(t)
-        if data:
-            results.append(f"{t}: {data['label']} ({data['score']})")
+        d = analyze_stock(t)
+        if d:
+            out.append(f"{t}: {d['label']} ({d['score']})")
 
-    await interaction.response.send_message("\n".join(results))
+    await interaction.followup.send("\n".join(out))
 
-@bot.tree.command(name="movers", description="Rank top movers")
+@bot.tree.command(name="movers")
 async def movers(interaction: discord.Interaction):
+    await interaction.response.defer()
+
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
 
     ranked = []
-
     for t in tickers:
-        data = analyze_stock(t)
-        if data:
-            ranked.append((t, data["score"]))
+        d = analyze_stock(t)
+        if d:
+            ranked.append((t, d["score"]))
 
     ranked.sort(key=lambda x: x[1], reverse=True)
 
@@ -148,9 +150,9 @@ async def movers(interaction: discord.Interaction):
     for t, s in ranked:
         msg += f"{t}: {round(s,2)}\n"
 
-    await interaction.response.send_message(msg)
+    await interaction.followup.send(msg)
 
-@bot.tree.command(name="watch", description="Add stock to watchlist")
+@bot.tree.command(name="watch")
 async def watch(interaction: discord.Interaction, ticker: str):
     user = str(interaction.user.id)
     data = get_user(user)
@@ -160,20 +162,20 @@ async def watch(interaction: discord.Interaction, ticker: str):
 
     await interaction.response.send_message(f"Added {ticker.upper()}")
 
-@bot.tree.command(name="mylist", description="Show watchlist")
+@bot.tree.command(name="mylist")
 async def mylist(interaction: discord.Interaction):
     user = str(interaction.user.id)
     data = get_user(user)
 
     await interaction.response.send_message(str(data["watchlist"]))
 
-@bot.tree.command(name="setmode", description="Set mode A/B/C")
+@bot.tree.command(name="setmode")
 async def setmode(interaction: discord.Interaction, mode: str):
     user = str(interaction.user.id)
     data = get_user(user)
 
     if mode.upper() not in ["A", "B", "C"]:
-        await interaction.response.send_message("Use A, B, or C")
+        await interaction.response.send_message("Use A B or C")
         return
 
     data["mode"] = mode.upper()
@@ -181,8 +183,19 @@ async def setmode(interaction: discord.Interaction, mode: str):
 
     await interaction.response.send_message(f"Mode set to {mode.upper()}")
 
-# =========================
-# RUN BOT
-# =========================
+@bot.tree.command(name="modes")
+async def modes(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "A = Aggressive\nB = Balanced\nC = Safe"
+    )
 
+@bot.tree.command(name="help")
+async def help(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "rate, scan, movers, watch, mylist, setmode, modes, status, help"
+    )
+
+# =========================
+# RUN
+# =========================
 bot.run(TOKEN)
