@@ -9,19 +9,18 @@ import pandas as pd
 from io import BytesIO
 
 # =========================
-# TOKEN
+# TOKENS
 # =========================
 TOKEN = os.getenv("DISCORD_TOKEN")
-
-if not TOKEN:
-    print("TOKEN NOT FOUND")
-    exit()
-
-# =========================
-# ALPACA (FREE DATA)
-# =========================
 ALPACA_KEY = os.getenv("ALPACA_KEY")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET")
+
+if not TOKEN:
+    print("MISSING DISCORD TOKEN")
+    exit()
+
+if not ALPACA_KEY or not ALPACA_SECRET:
+    print("MISSING ALPACA KEYS")
 
 BASE_URL = "https://data.alpaca.markets/v2"
 
@@ -57,16 +56,28 @@ def user(uid):
     return memory[uid]
 
 # =========================
-# MARKET DATA (1M)
+# FIXED ALPACA DATA FETCH
 # =========================
 def get_data(symbol, timeframe="1Min"):
     try:
-        url = f"{BASE_URL}/stocks/{symbol}/bars?timeframe={timeframe}&limit=50"
-        r = requests.get(url, headers=headers)
+        url = f"{BASE_URL}/stocks/{symbol}/bars"
+
+        params = {
+            "timeframe": timeframe,
+            "limit": 50,
+            "feed": "iex"   # CRITICAL FIX
+        }
+
+        r = requests.get(url, headers=headers, params=params)
+
         data = r.json()
 
-        bars = data.get("bars", [])
+        print("ALPACA RAW:", data)  # DEBUG
+
+        bars = data.get("bars")
+
         if not bars:
+            print("NO BARS RETURNED FOR:", symbol)
             return None
 
         close = [b["c"] for b in bars]
@@ -75,7 +86,8 @@ def get_data(symbol, timeframe="1Min"):
 
         return close, high, vol
 
-    except:
+    except Exception as e:
+        print("DATA ERROR:", e)
         return None
 
 # =========================
@@ -97,38 +109,32 @@ def analyze(symbol, mode="swing"):
     breakout = price > resistance
     rejection = high[-1] >= resistance and close[-1] < resistance
 
-    broke_before = max(close[-10:]) > resistance
-    retest = broke_before and abs(price - resistance) / resistance < 0.005
+    retest = False
+    if len(close) > 10:
+        broke = max(close[-10:]) > resistance
+        retest = broke and abs(price - resistance) / resistance < 0.005
 
-    vol_spike = vol[-1] > (sum(vol[-20:]) / 20) * 1.8
+    vol_spike = vol[-1] > (sum(vol[-20:]) / 20) * 1.8 if len(vol) > 20 else False
 
-    change = ((close[-1] - close[-5]) / close[-5]) * 100
+    change = ((close[-1] - close[-5]) / close[-5]) * 100 if len(close) > 5 else 0
 
     score = 0
 
-    # =========================
-    # MODE SYSTEM
-    # =========================
     if mode == "scalp":
-        breakout_w, retest_w, reject_w = 50, 40, -50
+        bw, rw, rj = 50, 40, -50
     elif mode == "daytrade":
-        breakout_w, retest_w, reject_w = 60, 50, -40
+        bw, rw, rj = 60, 50, -40
     elif mode == "smc":
-        breakout_w, retest_w, reject_w = 30, 60, -35
-    elif mode == "investor":
-        breakout_w, retest_w, reject_w = 70, 30, -25
+        bw, rw, rj = 30, 60, -35
     else:
-        breakout_w, retest_w, reject_w = 60, 50, -30
+        bw, rw, rj = 60, 50, -30
 
-    # =========================
-    # SIGNALS
-    # =========================
     if breakout:
-        score += breakout_w
+        score += bw
     if retest:
-        score += retest_w
+        score += rw
     if rejection:
-        score += reject_w
+        score += rj
     if vol_spike:
         score += 30
     if change > 0.5:
@@ -157,7 +163,7 @@ def analyze(symbol, mode="swing"):
     }
 
 # =========================
-# CHART SYSTEM (NEW)
+# SAFE CHARTS
 # =========================
 def make_chart(symbol, timeframe="1Min"):
     data = get_data(symbol, timeframe)
@@ -167,16 +173,11 @@ def make_chart(symbol, timeframe="1Min"):
 
     close, high, vol = data
 
-    df = pd.DataFrame({"close": close})
-
     plt.figure(figsize=(10,4))
-    plt.plot(df["close"], label="Price")
+    plt.plot(close, label="Price")
 
-    resistance = max(close)
-    support = min(close)
-
-    plt.axhline(resistance, color="red", linestyle="--", label="Resistance")
-    plt.axhline(support, color="green", linestyle="--", label="Support")
+    plt.axhline(max(close), color="red", linestyle="--", label="Resistance")
+    plt.axhline(min(close), color="green", linestyle="--", label="Support")
 
     plt.title(f"{symbol} {timeframe}")
     plt.legend()
@@ -211,21 +212,12 @@ async def rate(i: discord.Interaction, ticker: str):
 
     d = analyze(ticker.upper(), u["mode"])
     if not d:
-        await i.response.send_message("❌ No data")
+        await i.response.send_message("❌ No data (Alpaca issue / market closed)")
         return
 
-    u["agent"] = ticker.upper()
-    save(memory)
-
     await i.response.send_message(
-        f"📊 {ticker}\n"
-        f"{d['label']}\n\n"
+        f"📊 {ticker}\n{d['label']}\n"
         f"Price: {d['price']}\n"
-        f"Resistance: {d['resistance']}\n"
-        f"Support: {d['support']}\n"
-        f"Breakout: {d['breakout']}\n"
-        f"Retest: {d['retest']}\n"
-        f"Rejection: {d['rejection']}\n"
         f"Score: {d['score']}"
     )
 
@@ -237,64 +229,18 @@ async def scan(i: discord.Interaction):
     tickers = ["AAPL","TSLA","NVDA","MSFT","AMZN"]
 
     out = []
+
     for t in tickers:
         d = analyze(t, u["mode"])
         if d:
             out.append(f"{t}: {d['label']} ({d['score']})")
 
-    await i.followup.send("\n".join(out))
-
-@bot.tree.command(name="movers")
-async def movers(i: discord.Interaction):
-    await i.response.defer()
-
-    u = user(str(i.user.id))
-    tickers = ["AAPL","TSLA","NVDA","MSFT","AMZN"]
-
-    ranked = []
-    for t in tickers:
-        d = analyze(t, u["mode"])
-        if d:
-            ranked.append((t, d["score"]))
-
-    ranked.sort(reverse=True, key=lambda x: x[1])
-
-    msg = "📈 MOVERS\n\n"
-    for t, s in ranked:
-        msg += f"{t}: {s}\n"
-
-    await i.followup.send(msg)
-
-# =========================
-# MODE SYSTEM
-# =========================
-@bot.tree.command(name="setmode")
-async def setmode(i: discord.Interaction, mode: str):
-    u = user(str(i.user.id))
-    mode = mode.lower()
-
-    if mode not in ["swing","daytrade","scalp","smc","investor"]:
-        await i.response.send_message("Invalid mode")
+    if not out:
+        await i.followup.send("❌ No market data available (likely Alpaca feed/market issue)")
         return
 
-    u["mode"] = mode
-    save(memory)
+    await i.followup.send("\n".join(out))
 
-    await i.response.send_message(f"Mode set to {mode}")
-
-@bot.tree.command(name="modes")
-async def modes(i: discord.Interaction):
-    await i.response.send_message(
-        "swing - normal\n"
-        "daytrade - intraday\n"
-        "scalp - fast moves\n"
-        "smc - smart money concepts\n"
-        "investor - long term"
-    )
-
-# =========================
-# CHART COMMAND (NEW)
-# =========================
 @bot.tree.command(name="chart")
 async def chart(i: discord.Interaction, ticker: str, timeframe: str = "1Min"):
     await i.response.defer()
@@ -302,29 +248,23 @@ async def chart(i: discord.Interaction, ticker: str, timeframe: str = "1Min"):
     img = make_chart(ticker.upper(), timeframe)
 
     if not img:
-        await i.followup.send("❌ No data")
+        await i.followup.send("❌ No chart data available")
         return
 
     file = discord.File(img, filename="chart.png")
 
-    await i.followup.send(
-        content=f"📊 {ticker.upper()} {timeframe}",
-        file=file
+    await i.followup.send(file=file)
+
+@bot.tree.command(name="modes")
+async def modes(i: discord.Interaction):
+    await i.response.send_message(
+        "swing | daytrade | scalp | smc | investor"
     )
 
-# =========================
-# HELP
-# =========================
 @bot.tree.command(name="help")
 async def help(i: discord.Interaction):
     await i.response.send_message(
-        "/rate\n"
-        "/scan\n"
-        "/movers\n"
-        "/chart\n"
-        "/setmode\n"
-        "/modes\n"
-        "/help"
+        "/rate\n/scan\n/chart\n/modes\n"
     )
 
 # =========================
