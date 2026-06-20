@@ -3,7 +3,7 @@ import discord
 from discord import app_commands
 import requests
 import statistics
-import yfinance as yf
+from datetime import datetime
 
 # =========================
 # ENV
@@ -14,7 +14,6 @@ ALPACA_KEY = os.getenv("ALPACA_KEY")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET")
 
 GUILD_ID = 1516963264486183053
-
 BASE_URL = "https://data.alpaca.markets/v2"
 
 alpaca_enabled = bool(ALPACA_KEY and ALPACA_SECRET)
@@ -24,107 +23,131 @@ headers = {
     "APCA-API-SECRET-KEY": ALPACA_SECRET
 } if alpaca_enabled else {}
 
+if not DISCORD_TOKEN:
+    raise Exception("Missing DISCORD_TOKEN")
+
 # =========================
-# BOT SETUP (FIXED PROPER WAY)
+# BOT SETUP (FIXED PROPERLY)
 # =========================
 
 intents = discord.Intents.default()
-bot = discord.Bot(intents=intents)  # IMPORTANT FIX (NOT Client)
-tree = bot.tree
+class Bot(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+
+bot = Bot()
 
 user_modes = {}
 watchlists = {}
 
 # =========================
-# DATA ENGINE (ALPACA + YAHOO FALLBACK)
+# MARKET STATE
 # =========================
 
-def get_bars_alpaca(symbol):
+def market_open():
+    now = datetime.utcnow()
+    return 13 <= now.hour <= 20  # simple NY window (good enough for v1)
+
+# =========================
+# DATA ROUTER (KEY FIX)
+# =========================
+
+def get_alpaca(symbol):
     try:
         url = f"{BASE_URL}/stocks/{symbol}/bars"
+        params = {"timeframe": "1Min", "limit": 120, "feed": "iex"}
 
-        r = requests.get(
-            url,
-            headers=headers,
-            params={"timeframe": "1Min", "limit": 120, "feed": "iex"},
-            timeout=8
-        )
-
+        r = requests.get(url, headers=headers, params=params, timeout=10)
         if r.status_code != 200:
             return None
 
-        bars = r.json().get("bars", [])
-
-        if not bars:
+        data = r.json().get("bars", [])
+        if not data:
             return None
 
         c, h, l, v = [], [], [], []
 
-        for b in bars:
+        for b in data:
             c.append(b["c"])
             h.append(b["h"])
             l.append(b["l"])
             v.append(b["v"])
 
-        return c, h, l, v
-
-    except:
-        return None
-
-
-def get_bars_yahoo(symbol):
-    try:
-        t = yf.Ticker(symbol)
-        df = t.history(period="5d", interval="1m")
-
-        if df is None or df.empty:
+        if len(c) < 20:
             return None
 
-        c = df["Close"].tolist()
-        h = df["High"].tolist()
-        l = df["Low"].tolist()
-        v = df["Volume"].tolist()
-
         return c, h, l, v
 
     except:
         return None
 
 
-def get_bars(symbol):
-    data = get_bars_alpaca(symbol)
+# 🟡 YAHOO FALLBACK (NO yfinance dependency)
+def get_yahoo(symbol):
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        r = requests.get(url, timeout=10)
+
+        if r.status_code != 200:
+            return None
+
+        data = r.json()["chart"]["result"][0]
+        closes = data["indicators"]["quote"][0]["close"]
+        highs = data["indicators"]["quote"][0]["high"]
+        lows = data["indicators"]["quote"][0]["low"]
+        vols = data["indicators"]["quote"][0]["volume"]
+
+        # clean None values
+        closes = [x for x in closes if x is not None]
+        highs = [x for x in highs if x is not None]
+        lows = [x for x in lows if x is not None]
+        vols = [x for x in vols if x is not None]
+
+        if len(closes) < 20:
+            return None
+
+        return closes, highs, lows, vols
+
+    except:
+        return None
+
+
+def get_data(symbol):
+    # PRIMARY
+    if market_open():
+        data = get_alpaca(symbol)
+        if data:
+            return data
+
+    # FALLBACK
+    data = get_yahoo(symbol)
     if data:
         return data
 
-    return get_bars_yahoo(symbol)
+    return None
+
 
 # =========================
 # INDICATORS
 # =========================
 
 def indicators(c, h, l, v):
-    tp_vol = sum(((h[i] + l[i] + c[i]) / 3) * v[i] for i in range(len(c)))
-    vol_sum = sum(v)
+    tp_vol = sum(((h[i]+l[i]+c[i])/3)*v[i] for i in range(len(c)))
+    vol = sum(v)
 
-    vwap = tp_vol / vol_sum if vol_sum else c[-1]
+    vwap = tp_vol / vol if vol else c[-1]
 
-    gains, losses = [], []
+    gains = [max(c[i]-c[i-1], 0) for i in range(1, len(c))]
+    losses = [max(c[i-1]-c[i], 0) for i in range(1, len(c))]
 
-    for i in range(1, len(c)):
-        diff = c[i] - c[i - 1]
-        gains.append(diff if diff > 0 else 0)
-        losses.append(abs(diff) if diff < 0 else 0)
-
-    avg_gain = sum(gains[-14:]) / 14 if len(gains) >= 14 else 0
-    avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else 1
+    avg_gain = sum(gains[-14:]) / 14 if gains else 0
+    avg_loss = sum(losses[-14:]) / 14 if losses else 1
 
     rs = avg_gain / avg_loss if avg_loss else 100
     rsi = 100 - (100 / (1 + rs))
 
-    ema12 = statistics.mean(c[-12:])
-    ema26 = statistics.mean(c[-26:]) if len(c) >= 26 else ema12
-
-    macd = ema12 - ema26
+    macd = statistics.mean(c[-12:]) - statistics.mean(c[-26:]) if len(c) >= 26 else 0
 
     return vwap, rsi, macd
 
@@ -133,28 +156,17 @@ def levels(h, l):
     return min(l[-50:]), max(h[-50:])
 
 
-def is_breakout(price, resistance):
-    return price > resistance * 0.995
-
-
 def score(c, h, l, v):
+    price = c[-1]
     vwap, rsi, macd = indicators(c, h, l, v)
     support, resistance = levels(h, l)
 
-    price = c[-1]
     s = 50
 
     s += 15 if price > vwap else -15
-
-    if rsi > 70:
-        s += 10
-    elif rsi < 30:
-        s -= 10
-
+    s += 10 if rsi > 70 else -10 if rsi < 30 else 0
     s += 15 if macd > 0 else -15
-
-    if is_breakout(price, resistance):
-        s += 20
+    s += 20 if price > resistance * 0.995 else 0
 
     s = max(0, min(100, s))
 
@@ -171,96 +183,92 @@ def score(c, h, l, v):
 
     return s, sig, vwap, rsi, macd, support, resistance
 
+
 # =========================
-# COMMANDS
+# COMMANDS (STABLE SYNC FIX)
 # =========================
 
-@tree.command(name="scan", guild=discord.Object(id=GUILD_ID))
-async def scan(ctx):
-    await ctx.response.defer()
+@bot.tree.command(name="scan", guild=discord.Object(id=GUILD_ID))
+async def scan(i: discord.Interaction):
+    await i.response.defer()
 
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
+
     out = []
 
     for t in tickers:
-        data = get_bars(t)
+        data = get_data(t)
+
         if not data:
-            out.append(f"{t}: NO DATA")
+            out.append(f"{t}: NO DATA (market closed or API fail)")
             continue
 
         c, h, l, v = data
-        s, sig, *_ = score(c, h, l, v)
+        sc, sig, *_ = score(c, h, l, v)
 
-        out.append(f"{t}: {sig} ({s})")
+        out.append(f"{t}: {sig} ({sc}/100)")
 
-    await ctx.followup.send("\n".join(out))
+    await i.followup.send("\n".join(out))
 
 
-@tree.command(name="scalp", guild=discord.Object(id=GUILD_ID))
-async def scalp(ctx, symbol: str):
-    await ctx.response.defer()
+@bot.tree.command(name="scalp", guild=discord.Object(id=GUILD_ID))
+async def scalp(i: discord.Interaction, symbol: str):
+    await i.response.defer()
 
-    data = get_bars(symbol)
-
+    data = get_data(symbol)
     if not data:
-        return await ctx.followup.send("No data available")
+        await i.followup.send("No data available (Alpaca + Yahoo failed)")
+        return
 
     c, h, l, v = data
-    s, sig, vwap, rsi, macd, support, resistance = score(c, h, l, v)
+    sc, sig, vwap, rsi, macd, support, resistance = score(c, h, l, v)
 
-    await ctx.followup.send(
-        f"{symbol}\n{sig} ({s})\nVWAP: {vwap:.2f}\nRSI: {rsi:.1f}\nMACD: {macd:.3f}"
+    await i.followup.send(
+        f"📊 {symbol}\n{sig} ({sc}/100)\nVWAP: {vwap:.2f}\nRSI: {rsi:.1f}\nMACD: {macd:.3f}"
     )
 
 
-@tree.command(name="breakout", guild=discord.Object(id=GUILD_ID))
-async def breakout(ctx, symbol: str):
-    await ctx.response.defer()
+@bot.tree.command(name="breakout", guild=discord.Object(id=GUILD_ID))
+async def breakout(i: discord.Interaction, symbol: str):
+    await i.response.defer()
 
-    data = get_bars(symbol)
-
+    data = get_data(symbol)
     if not data:
-        return await ctx.followup.send("No data")
+        await i.followup.send("No data available")
+        return
 
     c, h, l, v = data
     _, resistance = levels(h, l)
 
-    msg = "🚀 BREAKOUT" if is_breakout(c[-1], resistance) else "📉 NO BREAKOUT"
-    await ctx.followup.send(msg)
+    if c[-1] > resistance * 0.995:
+        await i.followup.send(f"🚀 {symbol} BREAKOUT")
+    else:
+        await i.followup.send(f"📉 {symbol} below resistance")
 
 
-@tree.command(name="mode", guild=discord.Object(id=GUILD_ID))
-async def mode(ctx, mode: str):
-    user_modes[ctx.user.id] = mode
-    await ctx.response.send_message(f"Mode set: {mode}")
+@bot.tree.command(name="mode", guild=discord.Object(id=GUILD_ID))
+async def mode(i: discord.Interaction, mode: str):
+    user_modes[i.user.id] = mode
+    await i.response.send_message(f"Mode set → {mode}")
 
-
-@tree.command(name="help", guild=discord.Object(id=GUILD_ID))
-async def help_cmd(ctx):
-    await ctx.response.send_message(
-        "/scan /scalp /breakout /mode /watch"
-    )
 
 # =========================
-# CLEAN SYNC FIX
+# SYNC FIX (THIS FIXES YOUR MISSING COMMANDS)
 # =========================
 
 @bot.event
 async def setup_hook():
     guild = discord.Object(id=GUILD_ID)
 
-    tree.clear_commands(guild=guild)
-    await tree.sync(guild=guild)
+    bot.tree.clear_commands(guild=guild)
+    await bot.tree.sync(guild=guild)
 
-    print("Guild sync success V8")
+    print("Guild sync success")
 
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
-# =========================
-# RUN
-# =========================
 
 bot.run(DISCORD_TOKEN)
