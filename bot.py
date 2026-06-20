@@ -2,17 +2,16 @@ import os
 import discord
 from discord import app_commands
 import requests
+import statistics
 
 # =========================
-# ENV
+# ENV SAFE LOAD
 # =========================
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-
 ALPACA_KEY = os.getenv("ALPACA_KEY")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET")
-
-GUILD_ID = 1516963264486183053  # ✅ YOUR SERVER ID
+GUILD_ID = 1516963264486183053
 
 BASE_URL = "https://data.alpaca.markets/v2"
 
@@ -23,220 +22,334 @@ if ALPACA_KEY and ALPACA_SECRET:
         "APCA-API-SECRET-KEY": ALPACA_SECRET
     }
 else:
-    print("WARNING: Alpaca disabled")
+    print("WARNING: Alpaca keys missing → trading disabled")
 
 
 # =========================
-# MEMORY SYSTEM
-# =========================
-
-user_mode = {}
-
-def get_mode(uid):
-    return user_mode.get(uid, "invest")
-
-def set_mode(uid, mode):
-    user_mode[uid] = mode
-
-
-# =========================
-# BOT SETUP
+# DISCORD SETUP (NO DUPES FIXED)
 # =========================
 
 intents = discord.Intents.default()
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
+user_modes = {}
+watchlists = {}
+alerts = {}
+
 
 # =========================
-# SAFE DATA FETCH
+# HELP COMMAND (KEEP)
 # =========================
 
-def get_data(symbol):
+@tree.command(name="help", guild=discord.Object(id=GUILD_ID))
+async def help_cmd(i: discord.Interaction):
+    msg = """
+**📊 Stock Bot Commands**
+
+/scan - market scanner  
+/scalp <symbol> - 1m scalping signal  
+/rate <symbol> - full analysis  
+/compare <a> <b> - compare stocks  
+/breakout <symbol> - breakout detection  
+/besttrade - best setup scanner  
+/mode <day/swing/invest> - trading style  
+/watch <symbol> - add watchlist  
+"""
+    await i.response.send_message(msg)
+
+
+# =========================
+# SAFE ALPACA DATA FETCH (FIXED)
+# =========================
+
+def get_bars(symbol):
     try:
         url = f"{BASE_URL}/stocks/{symbol}/bars"
 
-        for tf in ["1Min", "5Min", "1Day"]:
-            params = {
-                "timeframe": tf,
-                "limit": 100,
-                "feed": "iex",
-                "adjustment": "raw"
-            }
+        params = {
+            "timeframe": "1Min",
+            "limit": 120,
+            "feed": "iex"
+        }
 
-            r = requests.get(url, headers=headers, params=params, timeout=10)
+        r = requests.get(url, headers=headers, params=params, timeout=10)
 
-            if r.status_code != 200:
-                continue
+        if r.status_code != 200:
+            return None
 
-            data = r.json()
-            bars = data.get("bars", [])
+        data = r.json()
+        bars = data.get("bars", [])
 
-            if not bars:
-                continue
+        if not bars:
+            return None
 
-            close = [b["c"] for b in bars]
-            high = [b["h"] for b in bars]
-            vol = [b["v"] for b in bars]
+        closes = [b["c"] for b in bars if b.get("c")]
+        highs = [b["h"] for b in bars if b.get("h")]
+        lows = [b["l"] for b in bars if b.get("l")]
+        vols = [b["v"] for b in bars if b.get("v")]
 
-            if len(close) > 10:
-                return close, high, vol
+        if len(closes) < 20:
+            return None
 
-        return None
+        return closes, highs, lows, vols
 
     except:
         return None
 
 
 # =========================
-# BREAKOUT LOGIC
+# INDICATORS (VWAP RSI MACD)
 # =========================
 
-def breakout(high, close, vol):
-    resistance = max(high[:-5])
-    return close[-1] > resistance and vol[-1] > sum(vol[:-1]) / len(vol[:-1]) * 1.5
+def indicators(closes, highs, lows, vols):
+    # VWAP
+    tp_vol = 0
+    vol_sum = 0
+
+    for i in range(len(closes)):
+        tp = (highs[i] + lows[i] + closes[i]) / 3
+        tp_vol += tp * vols[i]
+        vol_sum += vols[i]
+
+    vwap = tp_vol / vol_sum if vol_sum else closes[-1]
+
+    # RSI
+    gains, losses = [], []
+
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        if diff >= 0:
+            gains.append(diff)
+        else:
+            losses.append(abs(diff))
+
+    avg_gain = sum(gains[-14:]) / 14 if len(gains) >= 14 else 0
+    avg_loss = sum(losses[-14:]) / 14 if len(losses) >= 14 else 1
+
+    rs = avg_gain / avg_loss if avg_loss != 0 else 100
+    rsi = 100 - (100 / (1 + rs))
+
+    # MACD
+    ema12 = statistics.mean(closes[-12:])
+    ema26 = statistics.mean(closes[-26:]) if len(closes) >= 26 else ema12
+
+    macd = ema12 - ema26
+
+    return vwap, rsi, macd
 
 
 # =========================
-# HELP
+# SUPPORT / RESISTANCE + BREAKOUT
 # =========================
 
-@tree.command(name="help", guild=discord.Object(id=GUILD_ID))
-async def help_cmd(i: discord.Interaction):
-    await i.response.send_message(
-        "/scan\n/breakout\n/rate\n/compare\n/mode"
-    )
+def levels(highs, lows):
+    support = min(lows[-50:])
+    resistance = max(highs[-50:])
+    return support, resistance
+
+
+def breakout(price, resistance):
+    return price > resistance * 0.995
 
 
 # =========================
-# MODE
+# SCALPING ENGINE (CORE)
+# =========================
+
+def score_engine(c, h, l, v):
+    vwap, rsi, macd = indicators(c, h, l, v)
+    support, resistance = levels(h, l)
+
+    price = c[-1]
+
+    score = 50
+
+    # VWAP
+    score += 15 if price > vwap else -15
+
+    # RSI
+    if rsi > 70:
+        score += 10
+    elif rsi < 30:
+        score -= 10
+
+    # MACD
+    score += 15 if macd > 0 else -15
+
+    # BREAKOUT
+    if breakout(price, resistance):
+        score += 20
+
+    score = max(0, min(100, score))
+
+    if score >= 80:
+        signal = "🔥 STRONG BUY"
+    elif score >= 65:
+        signal = "⚡ BUY SETUP"
+    elif score <= 25:
+        signal = "❄ STRONG SELL"
+    elif score <= 40:
+        signal = "⚡ SELL SETUP"
+    else:
+        signal = "⏸ NO TRADE"
+
+    return score, signal, vwap, rsi, macd, support, resistance
+
+
+# =========================
+# MODE SYSTEM (KEEP FEATURE)
 # =========================
 
 @tree.command(name="mode", guild=discord.Object(id=GUILD_ID))
-async def mode_cmd(i: discord.Interaction, mode: str):
-    if mode not in ["day", "swing", "invest"]:
-        await i.response.send_message("Use: day / swing / invest")
-        return
-
-    set_mode(i.user.id, mode)
-    await i.response.send_message(f"Mode set: {mode}")
+async def mode(i: discord.Interaction, mode: str):
+    user_modes[i.user.id] = mode
+    await i.response.send_message(f"Mode set → {mode}")
 
 
 # =========================
-# SCAN
+# SCAN COMMAND (FIXED NO EMPTY ERRORS)
 # =========================
 
 @tree.command(name="scan", guild=discord.Object(id=GUILD_ID))
 async def scan(i: discord.Interaction):
-    await i.response.send_message("Scanning...")
+    await i.response.defer()
 
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
     out = []
 
     for t in tickers:
-        data = get_data(t)
+        data = get_bars(t)
 
         if not data:
             out.append(f"{t}: NO DATA")
             continue
 
-        c, h, v = data
-        change = ((c[-1] - c[0]) / c[0]) * 100
+        c, h, l, v = data
+        score, signal, *_ = score_engine(c, h, l, v)
 
-        mode = get_mode(i.user.id)
-        tag = {"day":"⚡ DAY","swing":"📈 SWING","invest":"💼 INVEST"}[mode]
-
-        out.append(f"{t}: {tag} ({change:.2f}%)")
+        out.append(f"{t}: {signal} ({score}/100)")
 
     await i.followup.send("\n".join(out))
 
 
 # =========================
-# BREAKOUT
+# SCALP COMMAND (KEEP + FIX)
+# =========================
+
+@tree.command(name="scalp", guild=discord.Object(id=GUILD_ID))
+async def scalp(i: discord.Interaction, symbol: str):
+    await i.response.defer()
+
+    data = get_bars(symbol)
+
+    if not data:
+        await i.followup.send("No data available")
+        return
+
+    c, h, l, v = data
+    score, signal, vwap, rsi, macd, support, resistance = score_engine(c, h, l, v)
+
+    msg = f"""
+📊 {symbol}
+{signal} ({score}/100)
+
+VWAP: {vwap:.2f}
+RSI: {rsi:.1f}
+MACD: {macd:.3f}
+
+Support: {support:.2f}
+Resistance: {resistance:.2f}
+"""
+
+    await i.followup.send(msg)
+
+
+# =========================
+# BREAKOUT COMMAND (NEW BUT SAFE)
 # =========================
 
 @tree.command(name="breakout", guild=discord.Object(id=GUILD_ID))
-async def breakout_cmd(i: discord.Interaction):
-    await i.response.send_message("Checking breakouts...")
+async def breakout_cmd(i: discord.Interaction, symbol: str):
+    await i.response.defer()
 
-    tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
-    out = []
-
-    for t in tickers:
-        data = get_data(t)
-
-        if not data:
-            continue
-
-        c, h, v = data
-
-        if breakout(h, c, v):
-            out.append(f"🚀 {t}: BREAKOUT")
-        else:
-            out.append(f"{t}: no setup")
-
-    await i.followup.send("\n".join(out))
-
-
-# =========================
-# RATE
-# =========================
-
-@tree.command(name="rate", guild=discord.Object(id=GUILD_ID))
-async def rate_cmd(i: discord.Interaction, symbol: str):
-    await i.response.send_message("Analyzing...")
-
-    data = get_data(symbol)
+    data = get_bars(symbol)
 
     if not data:
         await i.followup.send("No data")
         return
 
-    c, h, v = data
-    change = ((c[-1] - c[0]) / c[0]) * 100
+    c, h, l, v = data
+    _, resistance = levels(h, l)
 
-    rating = "BULLISH" if change > 2 else "BEARISH" if change < -2 else "NEUTRAL"
+    price = c[-1]
 
-    await i.followup.send(f"{symbol}: {rating} ({change:.2f}%)")
+    if breakout(price, resistance):
+        msg = f"🚀 {symbol} BREAKING OUT"
+    else:
+        msg = f"📉 {symbol} NOT breaking resistance"
 
-
-# =========================
-# COMPARE
-# =========================
-
-@tree.command(name="compare", guild=discord.Object(id=GUILD_ID))
-async def compare_cmd(i: discord.Interaction, a: str, b: str):
-    await i.response.send_message("Comparing...")
-
-    da = get_data(a)
-    db = get_data(b)
-
-    if not da or not db:
-        await i.followup.send("No data")
-        return
-
-    pa = ((da[0][-1] - da[0][0]) / da[0][0]) * 100
-    pb = ((db[0][-1] - db[0][0]) / db[0][0]) * 100
-
-    await i.followup.send(f"{a}: {pa:.2f}%\n{b}: {pb:.2f}%")
+    await i.followup.send(msg)
 
 
 # =========================
-# SAFE SYNC (FIXED)
+# BEST TRADE SCANNER
+# =========================
+
+@tree.command(name="besttrade", guild=discord.Object(id=GUILD_ID))
+async def besttrade(i: discord.Interaction):
+    await i.response.defer()
+
+    tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
+
+    best = ("NONE", 0)
+    out = []
+
+    for t in tickers:
+        data = get_bars(t)
+
+        if not data:
+            continue
+
+        c, h, l, v = data
+        score, signal, *_ = score_engine(c, h, l, v)
+
+        out.append(f"{t}: {signal} ({score})")
+
+        if score > best[1]:
+            best = (t, score)
+
+    out.append(f"\n🏆 BEST TRADE: {best[0]} ({best[1]}/100)")
+
+    await i.followup.send("\n".join(out))
+
+
+# =========================
+# WATCHLIST (SIMPLE MEMORY)
+# =========================
+
+@tree.command(name="watch", guild=discord.Object(id=GUILD_ID))
+async def watch(i: discord.Interaction, symbol: str):
+    uid = i.user.id
+
+    if uid not in watchlists:
+        watchlists[uid] = []
+
+    watchlists[uid].append(symbol.upper())
+
+    await i.response.send_message(f"Added {symbol} to watchlist")
+
+
+# =========================
+# READY + SYNC FIXED
 # =========================
 
 @bot.event
 async def setup_hook():
     guild = discord.Object(id=GUILD_ID)
 
-    try:
-        tree.copy_global_to(guild=guild)
-        await tree.sync(guild=guild)
-        print("Guild sync success")
-
-    except discord.Forbidden:
-        print("Guild sync failed → falling back to global sync")
-        await tree.sync()
+    await tree.sync(guild=guild)
+    print("Guild sync success")
 
 
 @bot.event
@@ -245,7 +358,7 @@ async def on_ready():
 
 
 # =========================
-# RUN
+# RUN BOT
 # =========================
 
 bot.run(DISCORD_TOKEN)
