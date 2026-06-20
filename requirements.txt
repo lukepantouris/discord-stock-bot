@@ -1,7 +1,6 @@
-discord.py==2.5.2
+discord.py==2.7.1
 requests
-numpy
-pandas
-aiohttp
 yfinance
-flask
+aiohttp
+pandas
+numpy
