@@ -1,7 +1,6 @@
 import os
 import discord
 from discord import app_commands
-from discord.ext import commands
 import requests
 
 # =========================
@@ -17,7 +16,6 @@ if not DISCORD_TOKEN:
 
 BASE_URL = "https://data.alpaca.markets/v2"
 
-# ONLY set headers if keys exist (IMPORTANT FIX)
 headers = {}
 if ALPACA_KEY and ALPACA_SECRET:
     headers = {
@@ -27,12 +25,12 @@ if ALPACA_KEY and ALPACA_SECRET:
 
 
 # =========================
-# BOT SETUP (FIXED PROPERLY)
+# BOT SETUP
 # =========================
 
 intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
-tree = bot.tree
+bot = discord.Client(intents=intents)
+tree = app_commands.CommandTree(bot)
 
 
 # =========================
@@ -40,16 +38,18 @@ tree = bot.tree
 # =========================
 
 @tree.command(name="help")
-async def help_cmd(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        "**Commands**\n"
-        "/help - show commands\n"
-        "/scan - scan stocks\n"
+async def help_cmd(i: discord.Interaction):
+    await i.response.send_message(
+        "**📊 Commands**\n"
+        "/scan - market scan\n"
+        "/movers - top movers (basic)\n"
+        "/breakout - breakout detection\n"
+        "/rate - stock strength rating\n"
     )
 
 
 # =========================
-# DATA FETCH (SAFE)
+# SAFE DATA FETCH
 # =========================
 
 def get_data(symbol):
@@ -69,35 +69,62 @@ def get_data(symbol):
             if r.status_code != 200:
                 continue
 
-            try:
-                data = r.json()
-            except:
-                continue
-
+            data = r.json()
             bars = data.get("bars", [])
 
             if not bars:
                 continue
 
             close = [b["c"] for b in bars if b.get("c") is not None]
+            high = [b["h"] for b in bars if b.get("h") is not None]
+            volume = [b["v"] for b in bars if b.get("v") is not None]
 
-            if len(close) >= 5:
-                return close
+            if len(close) >= 10:
+                return close, high, volume
 
         return None
 
-    except Exception as e:
-        print("DATA ERROR:", e)
+    except:
         return None
 
 
 # =========================
-# SCAN COMMAND (FIXED)
+# BREAKOUT ENGINE (NEW)
+# =========================
+
+def detect_breakout(highs, closes, volumes):
+    try:
+        resistance = max(highs[:-5])  # previous resistance zone
+        last_close = closes[-1]
+
+        avg_vol = sum(volumes[:-1]) / len(volumes[:-1])
+        last_vol = volumes[-1]
+
+        volume_spike = last_vol > avg_vol * 1.5
+
+        breakout = last_close > resistance and volume_spike
+
+        return {
+            "breakout": breakout,
+            "resistance": resistance,
+            "volume_spike": volume_spike
+        }
+
+    except:
+        return {
+            "breakout": False,
+            "resistance": 0,
+            "volume_spike": False
+        }
+
+
+# =========================
+# SCAN COMMAND
 # =========================
 
 @tree.command(name="scan")
-async def scan(interaction: discord.Interaction):
-    await interaction.response.defer(thinking=True)
+async def scan(i: discord.Interaction):
+    await i.response.send_message("Scanning markets... 📊")
 
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
     out = []
@@ -109,37 +136,88 @@ async def scan(interaction: discord.Interaction):
             out.append(f"{t}: ❌ NO DATA")
             continue
 
-        try:
-            change = ((data[-1] - data[0]) / data[0]) * 100
-        except:
+        close, high, vol = data
+
+        change = ((close[-1] - close[0]) / close[0]) * 100
+
+        signal = "STRONG" if abs(change) > 2 else "WEAK"
+
+        out.append(f"{t}: {signal} ({change:.2f}%)")
+
+    await i.followup.send("\n".join(out))
+
+
+# =========================
+# BREAKOUT COMMAND (NEW)
+# =========================
+
+@tree.command(name="breakout")
+async def breakout(i: discord.Interaction):
+    await i.response.send_message("Detecting breakouts... ⚡")
+
+    tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
+    out = []
+
+    for t in tickers:
+        data = get_data(t)
+
+        if not data:
             continue
 
-        label = "STRONG" if abs(change) > 2 else "WEAK"
-        out.append(f"{t}: {label} ({change:.2f}%)")
+        close, high, vol = data
+        result = detect_breakout(high, close, vol)
 
-    if len(out) == 0:
-        out = ["No market data available"]
+        if result["breakout"]:
+            out.append(f"🚀 {t}: BREAKOUT CONFIRMED")
+        elif result["volume_spike"]:
+            out.append(f"⚠️ {t}: Volume spike (no breakout)")
+        else:
+            out.append(f"— {t}: No setup")
 
-    await interaction.followup.send("\n".join(out))
+    await i.followup.send("\n".join(out))
 
 
 # =========================
-# SYNC FIX (VERY IMPORTANT)
+# SIMPLE RATE COMMAND
 # =========================
 
-@bot.event
-async def setup_hook():
-    await tree.sync()
-    print("Slash commands synced (setup_hook)")
+@tree.command(name="rate")
+async def rate(i: discord.Interaction, symbol: str):
+    await i.response.send_message(f"Analyzing {symbol}...")
 
+    data = get_data(symbol)
+
+    if not data:
+        await i.followup.send("No data available")
+        return
+
+    close, high, vol = data
+
+    change = ((close[-1] - close[0]) / close[0]) * 100
+
+    if change > 2:
+        rating = "BULLISH 📈"
+    elif change < -2:
+        rating = "BEARISH 📉"
+    else:
+        rating = "NEUTRAL ⚖️"
+
+    await i.followup.send(f"{symbol}: {rating} ({change:.2f}%)")
+
+
+# =========================
+# READY EVENT (IMPORTANT FIX)
+# =========================
 
 @bot.event
 async def on_ready():
+    await tree.sync()
+    print("Slash commands synced")
     print(f"Logged in as {bot.user}")
 
 
 # =========================
-# RUN
+# RUN BOT
 # =========================
 
 bot.run(DISCORD_TOKEN)
