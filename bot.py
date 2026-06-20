@@ -4,15 +4,15 @@ from discord import app_commands
 import requests
 
 # =========================
-# KEYS
+# ENV
 # =========================
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+
 ALPACA_KEY = os.getenv("ALPACA_KEY")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET")
 
-if not DISCORD_TOKEN:
-    raise Exception("Missing DISCORD_TOKEN")
+GUILD_ID = 0  # 🔴 PUT YOUR SERVER ID
 
 BASE_URL = "https://data.alpaca.markets/v2"
 
@@ -22,10 +22,27 @@ if ALPACA_KEY and ALPACA_SECRET:
         "APCA-API-KEY-ID": ALPACA_KEY,
         "APCA-API-SECRET-KEY": ALPACA_SECRET
     }
+else:
+    print("WARNING: Alpaca disabled")
 
 
 # =========================
-# BOT SETUP
+# MEMORY SYSTEM (NEW)
+# =========================
+
+user_mode = {}  # user_id -> mode
+
+
+def get_mode(user_id):
+    return user_mode.get(user_id, "invest")
+
+
+def set_mode(user_id, mode):
+    user_mode[user_id] = mode
+
+
+# =========================
+# DISCORD SETUP
 # =========================
 
 intents = discord.Intents.default()
@@ -34,22 +51,7 @@ tree = app_commands.CommandTree(bot)
 
 
 # =========================
-# HELP COMMAND
-# =========================
-
-@tree.command(name="help")
-async def help_cmd(i: discord.Interaction):
-    await i.response.send_message(
-        "**📊 Commands**\n"
-        "/scan - market scan\n"
-        "/movers - top movers (basic)\n"
-        "/breakout - breakout detection\n"
-        "/rate - stock strength rating\n"
-    )
-
-
-# =========================
-# SAFE DATA FETCH
+# DATA FETCH
 # =========================
 
 def get_data(symbol):
@@ -75,149 +77,200 @@ def get_data(symbol):
             if not bars:
                 continue
 
-            close = [b["c"] for b in bars if b.get("c") is not None]
-            high = [b["h"] for b in bars if b.get("h") is not None]
-            volume = [b["v"] for b in bars if b.get("v") is not None]
+            close = [b["c"] for b in bars]
+            high = [b["h"] for b in bars]
+            vol = [b["v"] for b in bars]
 
-            if len(close) >= 10:
-                return close, high, volume
+            if len(close) > 10:
+                return close, high, vol
 
         return None
-
     except:
         return None
 
 
 # =========================
-# BREAKOUT ENGINE (NEW)
+# BREAKOUT LOGIC
 # =========================
 
-def detect_breakout(highs, closes, volumes):
-    try:
-        resistance = max(highs[:-5])  # previous resistance zone
-        last_close = closes[-1]
+def breakout(high, close, vol):
+    resistance = max(high[:-5])
+    last = close[-1]
 
-        avg_vol = sum(volumes[:-1]) / len(volumes[:-1])
-        last_vol = volumes[-1]
+    avg = sum(vol[:-1]) / len(vol[:-1])
+    spike = vol[-1] > avg * 1.5
 
-        volume_spike = last_vol > avg_vol * 1.5
-
-        breakout = last_close > resistance and volume_spike
-
-        return {
-            "breakout": breakout,
-            "resistance": resistance,
-            "volume_spike": volume_spike
-        }
-
-    except:
-        return {
-            "breakout": False,
-            "resistance": 0,
-            "volume_spike": False
-        }
+    return last > resistance and spike
 
 
 # =========================
-# SCAN COMMAND
+# HELP
 # =========================
 
-@tree.command(name="scan")
+@tree.command(name="help", guild=discord.Object(id=GUILD_ID))
+async def help_cmd(i: discord.Interaction):
+    await i.response.send_message(
+        "**📊 V4 BOT COMMANDS**\n"
+        "/scan\n"
+        "/rate <symbol>\n"
+        "/breakout\n"
+        "/chart <symbol>\n"
+        "/compare <A> <B>\n"
+        "/mode <day/swing/invest>\n"
+    )
+
+
+# =========================
+# MODE COMMAND (NEW)
+# =========================
+
+@tree.command(name="mode", guild=discord.Object(id=GUILD_ID))
+async def mode_cmd(i: discord.Interaction, mode: str):
+    mode = mode.lower()
+
+    if mode not in ["day", "swing", "invest"]:
+        await i.response.send_message("Modes: day / swing / invest")
+        return
+
+    set_mode(i.user.id, mode)
+    await i.response.send_message(f"Mode set to: {mode.upper()}")
+
+
+# =========================
+# SCAN
+# =========================
+
+@tree.command(name="scan", guild=discord.Object(id=GUILD_ID))
 async def scan(i: discord.Interaction):
-    await i.response.send_message("Scanning markets... 📊")
+    await i.response.send_message("Scanning...")
 
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
     out = []
 
     for t in tickers:
         data = get_data(t)
-
         if not data:
-            out.append(f"{t}: ❌ NO DATA")
+            out.append(f"{t}: NO DATA")
             continue
 
-        close, high, vol = data
+        c, h, v = data
+        change = ((c[-1] - c[0]) / c[0]) * 100
 
-        change = ((close[-1] - close[0]) / close[0]) * 100
+        mode = get_mode(i.user.id)
 
-        signal = "STRONG" if abs(change) > 2 else "WEAK"
-
-        out.append(f"{t}: {signal} ({change:.2f}%)")
-
-    await i.followup.send("\n".join(out))
-
-
-# =========================
-# BREAKOUT COMMAND (NEW)
-# =========================
-
-@tree.command(name="breakout")
-async def breakout(i: discord.Interaction):
-    await i.response.send_message("Detecting breakouts... ⚡")
-
-    tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
-    out = []
-
-    for t in tickers:
-        data = get_data(t)
-
-        if not data:
-            continue
-
-        close, high, vol = data
-        result = detect_breakout(high, close, vol)
-
-        if result["breakout"]:
-            out.append(f"🚀 {t}: BREAKOUT CONFIRMED")
-        elif result["volume_spike"]:
-            out.append(f"⚠️ {t}: Volume spike (no breakout)")
+        if mode == "day":
+            label = "⚡ DAY TRADE"
+        elif mode == "swing":
+            label = "📈 SWING"
         else:
-            out.append(f"— {t}: No setup")
+            label = "💼 INVEST"
+
+        out.append(f"{t}: {label} ({change:.2f}%)")
 
     await i.followup.send("\n".join(out))
 
 
 # =========================
-# SIMPLE RATE COMMAND
+# BREAKOUT
 # =========================
 
-@tree.command(name="rate")
-async def rate(i: discord.Interaction, symbol: str):
+@tree.command(name="breakout", guild=discord.Object(id=GUILD_ID))
+async def breakout_cmd(i: discord.Interaction):
+    await i.response.send_message("Checking breakouts...")
+
+    tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
+    out = []
+
+    for t in tickers:
+        data = get_data(t)
+        if not data:
+            continue
+
+        c, h, v = data
+
+        if breakout(h, c, v):
+            out.append(f"🚀 {t}: BREAKOUT")
+        else:
+            out.append(f"— {t}: no setup")
+
+    await i.followup.send("\n".join(out))
+
+
+# =========================
+# RATE
+# =========================
+
+@tree.command(name="rate", guild=discord.Object(id=GUILD_ID))
+async def rate_cmd(i: discord.Interaction, symbol: str):
     await i.response.send_message(f"Analyzing {symbol}...")
 
     data = get_data(symbol)
 
     if not data:
-        await i.followup.send("No data available")
+        await i.followup.send("No data")
         return
 
-    close, high, vol = data
-
-    change = ((close[-1] - close[0]) / close[0]) * 100
+    c, h, v = data
+    change = ((c[-1] - c[0]) / c[0]) * 100
 
     if change > 2:
-        rating = "BULLISH 📈"
+        rating = "BULLISH"
     elif change < -2:
-        rating = "BEARISH 📉"
+        rating = "BEARISH"
     else:
-        rating = "NEUTRAL ⚖️"
+        rating = "NEUTRAL"
 
     await i.followup.send(f"{symbol}: {rating} ({change:.2f}%)")
 
 
 # =========================
-# READY EVENT (IMPORTANT FIX)
+# COMPARE (NEW)
+# =========================
+
+@tree.command(name="compare", guild=discord.Object(id=GUILD_ID))
+async def compare_cmd(i: discord.Interaction, a: str, b: str):
+    await i.response.send_message("Comparing...")
+
+    da = get_data(a)
+    db = get_data(b)
+
+    if not da or not db:
+        await i.followup.send("No data for comparison")
+        return
+
+    ca = da[0]
+    cb = db[0]
+
+    pa = ((ca[-1] - ca[0]) / ca[0]) * 100
+    pb = ((cb[-1] - cb[0]) / cb[0]) * 100
+
+    winner = a if pa > pb else b
+
+    await i.followup.send(f"{a}: {pa:.2f}%\n{b}: {pb:.2f}%\nWINNER: {winner}")
+
+
+# =========================
+# READY (FIXED SYNC)
 # =========================
 
 @bot.event
+async def setup_hook():
+    guild = discord.Object(id=GUILD_ID)
+
+    tree.clear_commands(guild=guild)
+    tree.copy_global_to(guild=guild)
+
+    await tree.sync(guild=guild)
+    print("Commands synced (V4)")
+
+
+@bot.event
 async def on_ready():
-    await tree.sync()
-    print("Slash commands synced")
     print(f"Logged in as {bot.user}")
 
 
 # =========================
-# RUN BOT
+# RUN
 # =========================
 
 bot.run(DISCORD_TOKEN)
