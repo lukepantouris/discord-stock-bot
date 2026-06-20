@@ -1,6 +1,7 @@
 import os
 import discord
 from discord import app_commands
+from discord.ext import commands
 import requests
 
 # =========================
@@ -14,24 +15,24 @@ ALPACA_SECRET = os.getenv("ALPACA_SECRET")
 if not DISCORD_TOKEN:
     raise Exception("Missing DISCORD_TOKEN")
 
-if not ALPACA_KEY or not ALPACA_SECRET:
-    print("WARNING: Alpaca keys missing → trading disabled")
-
 BASE_URL = "https://data.alpaca.markets/v2"
 
-headers = {
-    "APCA-API-KEY-ID": ALPACA_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_SECRET
-}
+# ONLY set headers if keys exist (IMPORTANT FIX)
+headers = {}
+if ALPACA_KEY and ALPACA_SECRET:
+    headers = {
+        "APCA-API-KEY-ID": ALPACA_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET
+    }
 
 
 # =========================
-# BOT SETUP
+# BOT SETUP (FIXED PROPERLY)
 # =========================
 
 intents = discord.Intents.default()
-bot = discord.Client(intents=intents)
-tree = app_commands.CommandTree(bot)
+bot = commands.Bot(command_prefix="!", intents=intents)
+tree = bot.tree
 
 
 # =========================
@@ -39,53 +40,23 @@ tree = app_commands.CommandTree(bot)
 # =========================
 
 @tree.command(name="help")
-async def help_cmd(i: discord.Interaction):
-    msg = (
+async def help_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message(
         "**Commands**\n"
-        "/scan - scans stocks\n"
-        "/movers - top movers\n"
-        "/rate - analyze stock\n"
+        "/help - show commands\n"
+        "/scan - scan stocks\n"
     )
-    await i.response.send_message(msg)
 
 
 # =========================
-# DATA FETCHER (FIXED)
+# DATA FETCH (SAFE)
 # =========================
 
-def get_data(symbol, timeframe="1Min"):
+def get_data(symbol):
     try:
         url = f"{BASE_URL}/stocks/{symbol}/bars"
 
-        params = {
-            "timeframe": timeframe,
-            "limit": 100,
-            "feed": "iex",
-            "adjustment": "raw"
-        }
-
-        r = requests.get(url, headers=headers, params=params, timeout=10)
-
-        if r.status_code != 200:
-            return fallback(symbol)
-
-        data = r.json()
-        bars = data.get("bars", [])
-
-        if not bars:
-            return fallback(symbol)
-
-        return clean(bars)
-
-    except:
-        return fallback(symbol)
-
-
-def fallback(symbol):
-    try:
-        url = f"{BASE_URL}/stocks/{symbol}/bars"
-
-        for tf in ["5Min", "1Day"]:
+        for tf in ["1Min", "5Min", "1Day"]:
             params = {
                 "timeframe": tf,
                 "limit": 100,
@@ -95,44 +66,38 @@ def fallback(symbol):
 
             r = requests.get(url, headers=headers, params=params, timeout=10)
 
-            if r.status_code == 200:
+            if r.status_code != 200:
+                continue
+
+            try:
                 data = r.json()
-                bars = data.get("bars", [])
+            except:
+                continue
 
-                if bars:
-                    return clean(bars)
+            bars = data.get("bars", [])
+
+            if not bars:
+                continue
+
+            close = [b["c"] for b in bars if b.get("c") is not None]
+
+            if len(close) >= 5:
+                return close
 
         return None
 
-    except:
+    except Exception as e:
+        print("DATA ERROR:", e)
         return None
-
-
-def clean(bars):
-    close, high, low, volume = [], [], [], []
-
-    for b in bars:
-        if None in (b.get("c"), b.get("h"), b.get("l"), b.get("v")):
-            continue
-
-        close.append(b["c"])
-        high.append(b["h"])
-        low.append(b["l"])
-        volume.append(b["v"])
-
-    if len(close) < 5:
-        return None
-
-    return close, high, low, volume
 
 
 # =========================
-# SCAN COMMAND (FIXED NO EMPTY MESSAGE)
+# SCAN COMMAND (FIXED)
 # =========================
 
 @tree.command(name="scan")
-async def scan(i: discord.Interaction):
-    await i.response.defer(thinking=True)
+async def scan(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
 
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
     out = []
@@ -141,34 +106,40 @@ async def scan(i: discord.Interaction):
         data = get_data(t)
 
         if not data:
+            out.append(f"{t}: ❌ NO DATA")
             continue
 
-        close, high, low, vol = data
-
-        change = ((close[-1] - close[0]) / close[0]) * 100
+        try:
+            change = ((data[-1] - data[0]) / data[0]) * 100
+        except:
+            continue
 
         label = "STRONG" if abs(change) > 2 else "WEAK"
-
         out.append(f"{t}: {label} ({change:.2f}%)")
 
-    if not out:
-        out = ["No market data available right now"]
+    if len(out) == 0:
+        out = ["No market data available"]
 
-    await i.followup.send("\n".join(out))
+    await interaction.followup.send("\n".join(out))
 
 
 # =========================
-# ON READY
+# SYNC FIX (VERY IMPORTANT)
 # =========================
 
 @bot.event
-async def on_ready():
+async def setup_hook():
     await tree.sync()
-    print("Slash commands synced")
+    print("Slash commands synced (setup_hook)")
+
+
+@bot.event
+async def on_ready():
+    print(f"Logged in as {bot.user}")
 
 
 # =========================
-# RUN BOT
+# RUN
 # =========================
 
 bot.run(DISCORD_TOKEN)
