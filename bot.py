@@ -37,21 +37,10 @@ if not DISCORD_TOKEN:
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-user_modes = {}
 watchlists = {}
 
 # =========================
-# SAFE SEND
-# =========================
-
-async def safe_send(interaction, content):
-    try:
-        await interaction.followup.send(content)
-    except:
-        pass
-
-# =========================
-# DATA PROVIDERS
+# DATA ENGINE (ALPACA + YAHOO FALLBACK)
 # =========================
 
 async def alpaca(symbol):
@@ -178,96 +167,104 @@ def score(c, h, l, v):
     return s, sig, vwap, rsi, macd, support, resistance
 
 # =========================
-# COMMANDS
+# COMMANDS (V2 CLEAN SPLIT)
 # =========================
 
 @bot.tree.command(name="help", description="Show commands", guild=discord.Object(id=GUILD_ID))
 async def help_cmd(interaction: discord.Interaction):
-    await interaction.response.send_message("scan / scalp / breakout / besttrade / watch")
+    await interaction.response.send_message(
+        "/scan - market overview\n"
+        "/besttrade - top opportunity\n"
+        "/scalp - detailed analysis\n"
+        "/breakout - breakout check\n"
+        "/watch - add ticker"
+    )
 
-@bot.tree.command(name="scan", description="Market scan", guild=discord.Object(id=GUILD_ID))
+
+@bot.tree.command(name="scan", description="Market overview scan", guild=discord.Object(id=GUILD_ID))
 async def scan_cmd(interaction: discord.Interaction):
     await interaction.response.defer()
 
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
-    out = []
+    results = []
 
     for t in tickers:
         data = await get_data(t)
-
         if not data:
-            out.append(f"{t}: NO DATA")
+            results.append(f"{t}: NO DATA")
             continue
 
         c, h, l, v = data
         s, sig, *_ = score(c, h, l, v)
 
-        out.append(f"{t}: {sig} ({s})")
+        results.append(f"{t}: {sig} ({s})")
 
-    await safe_send(interaction, "\n".join(out))
+    await interaction.followup.send("\n".join(results))
 
 
-@bot.tree.command(name="scalp", description="Scalp signal", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="besttrade", description="Find best setup", guild=discord.Object(id=GUILD_ID))
+async def besttrade_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
+
+    best = ("NONE", 0, None)
+    output = []
+
+    for t in tickers:
+        data = await get_data(t)
+        if not data:
+            continue
+
+        c, h, l, v = data
+        s, sig, *_ = score(c, h, l, v)
+
+        output.append(f"{t}: {sig} ({s})")
+
+        if s > best[1]:
+            best = (t, s, sig)
+
+    output.append(f"\n🏆 BEST TRADE: {best[0]} ({best[1]}) - {best[2]}")
+
+    await interaction.followup.send("\n".join(output))
+
+
+@bot.tree.command(name="scalp", description="Detailed signal", guild=discord.Object(id=GUILD_ID))
 async def scalp_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
 
     data = await get_data(symbol)
     if not data:
-        return await safe_send(interaction, "No data available")
+        return await interaction.followup.send("No data available")
 
     c, h, l, v = data
     s, sig, vwap, rsi, macd, support, resistance = score(c, h, l, v)
 
-    await safe_send(interaction,
+    await interaction.followup.send(
         f"""{symbol}
 {sig} ({s})
 
-VWAP {vwap:.2f}
-RSI {rsi:.1f}
-MACD {macd:.2f}
-Support {support:.2f}
-Resistance {resistance:.2f}"""
+VWAP: {vwap:.2f}
+RSI: {rsi:.1f}
+MACD: {macd:.2f}
+Support: {support:.2f}
+Resistance: {resistance:.2f}"""
     )
 
 
-@bot.tree.command(name="breakout", description="Breakout check", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="breakout", description="Breakout detection", guild=discord.Object(id=GUILD_ID))
 async def breakout_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
 
     data = await get_data(symbol)
     if not data:
-        return await safe_send(interaction, "No data")
+        return await interaction.followup.send("No data")
 
     c, h, l, v = data
     _, r = levels(h, l)
 
     msg = "🚀 BREAKOUT" if c[-1] > r * 0.995 else "📉 NO BREAKOUT"
-    await safe_send(interaction, msg)
-
-
-@bot.tree.command(name="besttrade", description="Best trade", guild=discord.Object(id=GUILD_ID))
-async def besttrade_cmd(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
-    best = ("NONE", 0)
-    out = []
-
-    for t in tickers:
-        data = await get_data(t)
-        if not data:
-            continue
-
-        c, h, l, v = data
-        s, sig, *_ = score(c, h, l, v)
-
-        out.append(f"{t}: {sig} ({s})")
-
-        if s > best[1]:
-            best = (t, s)
-
-    out.append(f"\nBEST: {best[0]} ({best[1]})")
-    await safe_send(interaction, "\n".join(out))
+    await interaction.followup.send(msg)
 
 
 @bot.tree.command(name="watch", description="Watchlist", guild=discord.Object(id=GUILD_ID))
@@ -276,7 +273,7 @@ async def watch_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.send_message(f"Watching {symbol}")
 
 # =========================
-# ✅ FIXED STABLE SYNC (ONLY CHANGE)
+# STABLE SYNC (NO CLEARING EVER)
 # =========================
 
 @bot.event
@@ -284,7 +281,6 @@ async def setup_hook():
     guild = discord.Object(id=GUILD_ID)
 
     try:
-        # SAFE SYNC ONLY (NO CLEARING COMMANDS)
         synced = await bot.tree.sync(guild=guild)
 
         print("SYNC OK")
