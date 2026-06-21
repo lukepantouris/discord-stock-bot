@@ -2,7 +2,8 @@ import os
 import discord
 from discord.ext import commands
 from discord import app_commands
-import requests
+import asyncio
+import aiohttp
 import statistics
 import yfinance as yf
 
@@ -20,9 +21,9 @@ BASE_URL = "https://data.alpaca.markets/v2"
 
 alpaca_enabled = bool(ALPACA_KEY and ALPACA_SECRET)
 
-headers = {}
+HEADERS = {}
 if alpaca_enabled:
-    headers = {
+    HEADERS = {
         "APCA-API-KEY-ID": ALPACA_KEY,
         "APCA-API-SECRET-KEY": ALPACA_SECRET
     }
@@ -31,7 +32,7 @@ if not DISCORD_TOKEN:
     raise Exception("Missing DISCORD_TOKEN")
 
 # =========================
-# BOT CORE
+# BOT CORE (STABLE V3)
 # =========================
 
 intents = discord.Intents.default()
@@ -40,35 +41,44 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 watchlists = {}
 
 # =========================
-# DATA ENGINE (ALPACA + YAHOO FALLBACK)
+# SAFE HTTP (ASYNC FIX)
 # =========================
 
-async def alpaca(symbol):
+async def fetch_json(session, url, params=None):
     try:
-        url = f"{BASE_URL}/stocks/{symbol}/bars"
-
-        r = requests.get(
-            url,
-            headers=headers,
-            params={"timeframe": "1Min", "limit": 120, "feed": "iex"},
-            timeout=6
-        )
-
-        if r.status_code != 200:
-            return None
-
-        bars = r.json().get("bars", [])
-        if not bars:
-            return None
-
-        return (
-            [b["c"] for b in bars],
-            [b["h"] for b in bars],
-            [b["l"] for b in bars],
-            [b["v"] for b in bars],
-        )
+        async with session.get(url, headers=HEADERS, params=params, timeout=6) as r:
+            if r.status != 200:
+                return None
+            return await r.json()
     except:
         return None
+
+# =========================
+# DATA PROVIDER (V3 FIXED)
+# =========================
+
+async def alpaca(session, symbol):
+    url = f"{BASE_URL}/stocks/{symbol}/bars"
+
+    data = await fetch_json(session, url, {
+        "timeframe": "1Min",
+        "limit": 120,
+        "feed": "iex"
+    })
+
+    if not data:
+        return None
+
+    bars = data.get("bars", [])
+    if not bars:
+        return None
+
+    return (
+        [b["c"] for b in bars],
+        [b["h"] for b in bars],
+        [b["l"] for b in bars],
+        [b["v"] for b in bars],
+    )
 
 
 async def yahoo(symbol):
@@ -89,11 +99,11 @@ async def yahoo(symbol):
         return None
 
 
-async def get_data(symbol):
+async def get_data(session, symbol):
     data = None
 
     if alpaca_enabled:
-        data = await alpaca(symbol)
+        data = await alpaca(session, symbol)
 
     if not data:
         data = await yahoo(symbol)
@@ -101,15 +111,14 @@ async def get_data(symbol):
     return data
 
 # =========================
-# INDICATORS
+# INDICATORS ENGINE (UNCHANGED BUT SAFE)
 # =========================
 
 def indicators(c, h, l, v):
     tp = [(h[i] + l[i] + c[i]) / 3 for i in range(len(c))]
     vwap = sum(tp[i] * v[i] for i in range(len(c))) / sum(v) if sum(v) else c[-1]
 
-    gains = []
-    losses = []
+    gains, losses = [], []
 
     for i in range(1, len(c)):
         d = c[i] - c[i - 1]
@@ -167,64 +176,64 @@ def score(c, h, l, v):
     return s, sig, vwap, rsi, macd, support, resistance
 
 # =========================
-# COMMANDS (V2 CLEAN SPLIT)
+# COMMANDS (V3 CLEAN)
 # =========================
 
-@bot.tree.command(name="help", description="Show commands", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="help", description="Commands", guild=discord.Object(id=GUILD_ID))
 async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(
-        "/scan - market overview\n"
-        "/besttrade - top opportunity\n"
-        "/scalp - detailed analysis\n"
-        "/breakout - breakout check\n"
-        "/watch - add ticker"
+        "/scan /besttrade /scalp /breakout /watch"
     )
 
 
-@bot.tree.command(name="scan", description="Market overview scan", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="scan", description="Market scan", guild=discord.Object(id=GUILD_ID))
 async def scan_cmd(interaction: discord.Interaction):
     await interaction.response.defer()
 
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
     results = []
 
-    for t in tickers:
-        data = await get_data(t)
-        if not data:
-            results.append(f"{t}: NO DATA")
-            continue
+    async with aiohttp.ClientSession() as session:
+        for t in tickers:
+            data = await get_data(session, t)
 
-        c, h, l, v = data
-        s, sig, *_ = score(c, h, l, v)
+            if not data:
+                results.append(f"{t}: NO DATA")
+                continue
 
-        results.append(f"{t}: {sig} ({s})")
+            c, h, l, v = data
+            s, sig, *_ = score(c, h, l, v)
+
+            results.append(f"{t}: {sig} ({s})")
 
     await interaction.followup.send("\n".join(results))
 
 
-@bot.tree.command(name="besttrade", description="Find best setup", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="besttrade", description="Best setup", guild=discord.Object(id=GUILD_ID))
 async def besttrade_cmd(interaction: discord.Interaction):
     await interaction.response.defer()
 
     tickers = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
+    best = ("NONE", 0)
 
-    best = ("NONE", 0, None)
     output = []
 
-    for t in tickers:
-        data = await get_data(t)
-        if not data:
-            continue
+    async with aiohttp.ClientSession() as session:
+        for t in tickers:
+            data = await get_data(session, t)
 
-        c, h, l, v = data
-        s, sig, *_ = score(c, h, l, v)
+            if not data:
+                continue
 
-        output.append(f"{t}: {sig} ({s})")
+            c, h, l, v = data
+            s, sig, *_ = score(c, h, l, v)
 
-        if s > best[1]:
-            best = (t, s, sig)
+            output.append(f"{t}: {sig} ({s})")
 
-    output.append(f"\n🏆 BEST TRADE: {best[0]} ({best[1]}) - {best[2]}")
+            if s > best[1]:
+                best = (t, s)
+
+    output.append(f"\n🏆 BEST: {best[0]} ({best[1]})")
 
     await interaction.followup.send("\n".join(output))
 
@@ -233,7 +242,9 @@ async def besttrade_cmd(interaction: discord.Interaction):
 async def scalp_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
 
-    data = await get_data(symbol)
+    async with aiohttp.ClientSession() as session:
+        data = await get_data(session, symbol)
+
     if not data:
         return await interaction.followup.send("No data available")
 
@@ -252,11 +263,13 @@ Resistance: {resistance:.2f}"""
     )
 
 
-@bot.tree.command(name="breakout", description="Breakout detection", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="breakout", description="Breakout check", guild=discord.Object(id=GUILD_ID))
 async def breakout_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
 
-    data = await get_data(symbol)
+    async with aiohttp.ClientSession() as session:
+        data = await get_data(session, symbol)
+
     if not data:
         return await interaction.followup.send("No data")
 
@@ -264,6 +277,7 @@ async def breakout_cmd(interaction: discord.Interaction, symbol: str):
     _, r = levels(h, l)
 
     msg = "🚀 BREAKOUT" if c[-1] > r * 0.995 else "📉 NO BREAKOUT"
+
     await interaction.followup.send(msg)
 
 
@@ -273,18 +287,16 @@ async def watch_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.send_message(f"Watching {symbol}")
 
 # =========================
-# STABLE SYNC (NO CLEARING EVER)
+# V3 SAFE SYNC (NO DESYNC EVER)
 # =========================
 
 @bot.event
 async def setup_hook():
-    guild = discord.Object(id=GUILD_ID)
-
     try:
-        synced = await bot.tree.sync(guild=guild)
+        synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
 
         print("SYNC OK")
-        print("Commands:", [c.name for c in synced])
+        print([c.name for c in synced])
 
     except Exception as e:
         print("SYNC ERROR:", e)
