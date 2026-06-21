@@ -17,9 +17,13 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install discord.py yfinance
+        run: |
+          pip install --upgrade pip
+          pip install discord.py==2.4.0 requests yfinance aiohttp pandas numpy
 
       - name: Run bot
         env:
-          TOKEN: ${{ secrets.TOKEN }}
+          DISCORD_TOKEN: ${{ secrets.TOKEN }}
+          ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
         run: python bot.py
