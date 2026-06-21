@@ -16,6 +16,8 @@ ALPACA_KEY = os.getenv("ALPACA_KEY")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET")
 
 GUILD_ID = 1516963264486183053
+ADMIN_ID = 1478514616718856244
+
 BASE_URL = "https://data.alpaca.markets/v2"
 
 alpaca_enabled = bool(ALPACA_KEY and ALPACA_SECRET)
@@ -29,9 +31,6 @@ if alpaca_enabled:
 
 if not DISCORD_TOKEN:
     raise Exception("Missing DISCORD_TOKEN")
-
-# 🔥 ADDED LINE (ADMIN CONTROL)
-ADMIN_ID = 1478514616718856244
 
 # =========================
 # BOT CORE
@@ -48,9 +47,40 @@ user_modes = {}
 watchlists = {}
 price_cache = {}
 
-TICKERS = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
-
 MODES = ["investing", "swing", "day", "scalp"]
+
+# =========================
+# MARKET UNIVERSE (V9 EXPANDED)
+# =========================
+
+TICKERS = [
+    # Mega Tech
+    "AAPL", "MSFT", "NVDA", "AMD", "GOOGL", "META", "AMZN",
+
+    # ETFs
+    "SPY", "QQQ", "IWM", "DIA",
+
+    # Finance
+    "JPM", "BAC", "WFC", "GS", "C",
+
+    # Retail
+    "TSLA", "COST", "WMT", "HD", "TGT",
+
+    # Healthcare
+    "UNH", "PFE", "JNJ", "MRK",
+
+    # Energy
+    "XOM", "CVX", "COP",
+
+    # Semis
+    "AVGO", "INTC", "QCOM",
+
+    # Growth / Volatile
+    "PLTR", "SOFI", "RIVN",
+
+    # Other large caps
+    "NFLX", "DIS", "ORCL", "ADBE"
+]
 
 # =========================
 # MODE SYSTEM
@@ -58,17 +88,6 @@ MODES = ["investing", "swing", "day", "scalp"]
 
 def get_mode(uid):
     return user_modes.get(uid, "swing")
-
-def apply_mode(mode, score):
-    if mode == "investing":
-        return score * 0.85
-    if mode == "swing":
-        return score
-    if mode == "day":
-        return score * 1.1
-    if mode == "scalp":
-        return score * 1.25
-    return score
 
 # =========================
 # DATA
@@ -168,7 +187,7 @@ def breakout(price, resistance):
     return price > resistance * 0.995
 
 # =========================
-# SCORING ENGINE
+# V9 SYMMETRIC SCORING ENGINE
 # =========================
 
 def score(c, h, l, v, mode):
@@ -176,33 +195,67 @@ def score(c, h, l, v, mode):
     support, resistance = levels(h, l)
 
     price = c[-1]
-    s = 50
 
-    s += 15 if price > vwap else -15
-    s += 10 if rsi > 70 else -10 if rsi < 30 else 0
-    s += 15 if macd > 0 else -15
+    bullish = 0
+    bearish = 0
 
+    # VWAP symmetry
+    if price > vwap:
+        bullish += 1
+    else:
+        bearish += 1
+
+    # RSI symmetry
+    if rsi < 30:
+        bullish += 2
+    elif rsi > 70:
+        bearish += 2
+    else:
+        if rsi > 50:
+            bullish += 1
+        else:
+            bearish += 1
+
+    # MACD symmetry
+    if macd > 0:
+        bullish += 2
+    else:
+        bearish += 2
+
+    # breakout vs breakdown
     if breakout(price, resistance):
-        s += 20
+        bullish += 3
+    elif price < support * 1.005:
+        bearish += 3
 
-    s = apply_mode(mode, s)
-    s = max(0, min(100, s))
+    raw = bullish - bearish
 
-    if s >= 80:
+    # mode tuning
+    if mode == "scalp":
+        raw *= 1.5
+    elif mode == "day":
+        raw *= 1.2
+    elif mode == "investing":
+        raw *= 0.9
+
+    score = 50 + (raw * 12)
+    score = max(0, min(100, score))
+
+    if score >= 75:
         sig = "🔥 STRONG BUY"
-    elif s >= 65:
+    elif score >= 60:
         sig = "⚡ BUY"
-    elif s <= 25:
+    elif score <= 35:
         sig = "❄ STRONG SELL"
-    elif s <= 40:
+    elif score <= 45:
         sig = "⚡ SELL"
     else:
         sig = "⏸ HOLD"
 
-    return s, sig, vwap, rsi, macd, support, resistance
+    return score, sig, vwap, rsi, macd, support, resistance
 
 # =========================
-# ALERT SYSTEM
+# ALERT LOOP
 # =========================
 
 async def alert_loop():
@@ -231,10 +284,8 @@ async def alert_loop():
                             change = ((price - old_price) / old_price) * 100
 
                             if abs(change) >= 1.0:
-
                                 try:
                                     user = await bot.fetch_user(user_id)
-
                                     await user.send(
                                         f"🚨 ALERT {symbol}\n"
                                         f"Move: {change:.2f}%\n"
@@ -256,17 +307,14 @@ async def alert_loop():
 @bot.tree.command(name="help", description="Commands", guild=discord.Object(id=GUILD_ID))
 async def help_cmd(interaction):
     await interaction.response.send_message(
-        "/mode /scan /opportunities /scalp /breakout /detail /watch /watchlist"
+        "/mode /scan /opportunities /scalp /detail /watch /watchlist"
     )
 
 @bot.tree.command(name="mode", description="Set mode", guild=discord.Object(id=GUILD_ID))
 async def mode_cmd(interaction, mode: str):
     mode = mode.lower()
-
     if mode not in MODES:
-        return await interaction.response.send_message(
-            "Modes:\ninvesting\nswing\nday\nscalp"
-        )
+        return await interaction.response.send_message("investing / swing / day / scalp")
 
     user_modes[interaction.user.id] = mode
     await interaction.response.send_message(f"Mode → {mode}")
@@ -282,7 +330,6 @@ async def scan_cmd(interaction):
         for t in TICKERS:
             data = await get_data(session, t)
             if not data:
-                results.append(f"{t}: NO DATA")
                 continue
 
             c, h, l, v = data
@@ -290,9 +337,7 @@ async def scan_cmd(interaction):
 
             results.append(f"{t}: {sig} ({int(s)})")
 
-    await interaction.followup.send(
-        f"MODE: {mode}\n\n" + "\n".join(results)
-    )
+    await interaction.followup.send(f"MODE: {mode}\n\n" + "\n".join(results))
 
 @bot.tree.command(name="opportunities", description="Top setups", guild=discord.Object(id=GUILD_ID))
 async def opp_cmd(interaction):
@@ -313,10 +358,7 @@ async def opp_cmd(interaction):
             if s >= 70:
                 results.append(f"{t}: {sig} ({int(s)})")
 
-    if not results:
-        return await interaction.followup.send("No setups")
-
-    await interaction.followup.send("\n".join(results))
+    await interaction.followup.send("\n".join(results) if results else "No setups")
 
 @bot.tree.command(name="scalp", description="Quick signal", guild=discord.Object(id=GUILD_ID))
 async def scalp_cmd(interaction, symbol: str):
@@ -356,10 +398,9 @@ async def detail_cmd(interaction, symbol: str):
         f"{symbol} DETAIL\n{sig} ({int(s)})\nVWAP {vwap:.2f}\nRSI {rsi:.1f}"
     )
 
-@bot.tree.command(name="watch", description="Add alert watch", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="watch", description="Add watch", guild=discord.Object(id=GUILD_ID))
 async def watch_cmd(interaction, symbol: str):
     watchlists.setdefault(interaction.user.id, [])
-
     if symbol not in watchlists[interaction.user.id]:
         watchlists[interaction.user.id].append(symbol)
 
@@ -368,7 +409,6 @@ async def watch_cmd(interaction, symbol: str):
 @bot.tree.command(name="watchlist", description="View watchlist", guild=discord.Object(id=GUILD_ID))
 async def watchlist_cmd(interaction):
     items = watchlists.get(interaction.user.id, [])
-
     await interaction.response.send_message("\n".join(items) if items else "Empty")
 
 # =========================
