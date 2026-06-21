@@ -256,10 +256,6 @@ async def help_cmd(interaction):
         "/mode /scan /opportunities /scalp /breakout /detail /watch /watchlist"
     )
 
-# -------------------------
-# MODE
-# -------------------------
-
 @bot.tree.command(name="mode", description="Set mode", guild=discord.Object(id=GUILD_ID))
 async def mode_cmd(interaction, mode: str):
     mode = mode.lower()
@@ -271,10 +267,6 @@ async def mode_cmd(interaction, mode: str):
 
     user_modes[interaction.user.id] = mode
     await interaction.response.send_message(f"Mode → {mode}")
-
-# -------------------------
-# SCAN
-# -------------------------
 
 @bot.tree.command(name="scan", description="Market scan", guild=discord.Object(id=GUILD_ID))
 async def scan_cmd(interaction):
@@ -298,10 +290,6 @@ async def scan_cmd(interaction):
     await interaction.followup.send(
         f"MODE: {mode}\n\n" + "\n".join(results)
     )
-
-# -------------------------
-# OPPORTUNITIES
-# -------------------------
 
 @bot.tree.command(name="opportunities", description="Top setups", guild=discord.Object(id=GUILD_ID))
 async def opp_cmd(interaction):
@@ -327,10 +315,6 @@ async def opp_cmd(interaction):
 
     await interaction.followup.send("\n".join(results))
 
-# -------------------------
-# SCALP
-# -------------------------
-
 @bot.tree.command(name="scalp", description="Quick signal", guild=discord.Object(id=GUILD_ID))
 async def scalp_cmd(interaction, symbol: str):
     await interaction.response.defer()
@@ -349,10 +333,6 @@ async def scalp_cmd(interaction, symbol: str):
     await interaction.followup.send(
         f"{symbol}\n{sig} ({int(s)})\nVWAP {vwap:.2f}\nRSI {rsi:.1f}"
     )
-
-# -------------------------
-# DETAIL
-# -------------------------
 
 @bot.tree.command(name="detail", description="Full breakdown", guild=discord.Object(id=GUILD_ID))
 async def detail_cmd(interaction, symbol: str):
@@ -373,10 +353,6 @@ async def detail_cmd(interaction, symbol: str):
         f"{symbol} DETAIL\n{sig} ({int(s)})\nVWAP {vwap:.2f}\nRSI {rsi:.1f}"
     )
 
-# -------------------------
-# WATCHLIST + ALERTS
-# -------------------------
-
 @bot.tree.command(name="watch", description="Add alert watch", guild=discord.Object(id=GUILD_ID))
 async def watch_cmd(interaction, symbol: str):
     watchlists.setdefault(interaction.user.id, [])
@@ -395,10 +371,6 @@ async def watchlist_cmd(interaction):
 
     await interaction.response.send_message("\n".join(items))
 
-# =========================
-# SYNC
-# =========================
-
 @bot.event
 async def setup_hook():
     try:
@@ -411,11 +383,11 @@ async def setup_hook():
 async def on_ready():
     print(f"Logged in as {bot.user}")
 
-    # START ALERT LOOP
-    bot.loop.create_task(alert_loop())
+    print("===== GUILDS =====")
+    for guild in bot.guilds:
+        print(f"{guild.name} | {guild.id}")
+    print("==================")
 
-# =========================
-# RUN
-# =========================
+    bot.loop.create_task(alert_loop())
 
 bot.run(DISCORD_TOKEN)
