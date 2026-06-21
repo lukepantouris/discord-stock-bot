@@ -1,7 +1,6 @@
 import os
 import discord
 from discord.ext import commands
-from discord import app_commands
 import aiohttp
 import statistics
 import yfinance as yf
@@ -37,33 +36,37 @@ if not DISCORD_TOKEN:
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# =========================
+# STATE
+# =========================
+
 user_modes = {}
 watchlists = {}
 
 TICKERS = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
 
+MODES = ["investing", "swing", "day", "scalp"]
+
 # =========================
 # MODE SYSTEM
 # =========================
 
-MODES = ["investing", "swing", "day", "scalp"]
+def get_mode(uid):
+    return user_modes.get(uid, "swing")
 
-def set_mode_weight(mode, score):
+def apply_mode(mode, score):
     if mode == "investing":
         return score * 0.85
     if mode == "swing":
         return score
     if mode == "day":
-        return score * 1.10
+        return score * 1.1
     if mode == "scalp":
         return score * 1.25
     return score
 
-def get_user_mode(user_id):
-    return user_modes.get(user_id, "swing")
-
 # =========================
-# DATA FETCH (STABLE)
+# DATA
 # =========================
 
 async def fetch_json(session, url, params=None):
@@ -160,7 +163,7 @@ def breakout(price, resistance):
     return price > resistance * 0.995
 
 # =========================
-# SCORING ENGINE (MODE-AWARE)
+# SCORING (MODE AWARE)
 # =========================
 
 def score(c, h, l, v, mode):
@@ -170,7 +173,6 @@ def score(c, h, l, v, mode):
     price = c[-1]
     s = 50
 
-    # base logic
     s += 15 if price > vwap else -15
     s += 10 if rsi > 70 else -10 if rsi < 30 else 0
     s += 15 if macd > 0 else -15
@@ -178,10 +180,7 @@ def score(c, h, l, v, mode):
     if breakout(price, resistance):
         s += 20
 
-    # mode adjustments
-    s = set_mode_weight(mode, s)
-
-    # clamp
+    s = apply_mode(mode, s)
     s = max(0, min(100, s))
 
     if s >= 80:
@@ -201,37 +200,41 @@ def score(c, h, l, v, mode):
 # COMMANDS
 # =========================
 
-@bot.tree.command(name="help", description="Commands", guild=discord.Object(id=GUILD_ID))
-async def help_cmd(interaction: discord.Interaction):
+@bot.tree.command(name="help", description="All commands", guild=discord.Object(id=GUILD_ID))
+async def help_cmd(interaction):
     await interaction.response.send_message(
-        "/mode /scan /opportunities /scalp /breakout /watch /detail"
+        "/mode /scan /opportunities /scalp /breakout /watch /watchlist /detail"
     )
 
 # -------------------------
-# MODE COMMAND
+# MODE (FIXED UX)
 # -------------------------
 
 @bot.tree.command(name="mode", description="Set trading mode", guild=discord.Object(id=GUILD_ID))
-async def mode_cmd(interaction: discord.Interaction, mode: str):
+async def mode_cmd(interaction, mode: str):
     mode = mode.lower()
 
     if mode not in MODES:
         return await interaction.response.send_message(
-            f"Invalid mode. Choose: {', '.join(MODES)}"
+            "Modes:\n"
+            "- investing (safe long term)\n"
+            "- swing (balanced default)\n"
+            "- day (fast)\n"
+            "- scalp (very fast)"
         )
 
     user_modes[interaction.user.id] = mode
     await interaction.response.send_message(f"Mode set → {mode}")
 
 # -------------------------
-# SCAN (FULL MARKET VIEW)
+# SCAN (MARKET OVERVIEW)
 # -------------------------
 
-@bot.tree.command(name="scan", description="Market overview", guild=discord.Object(id=GUILD_ID))
-async def scan_cmd(interaction: discord.Interaction):
+@bot.tree.command(name="scan", description="Market scan", guild=discord.Object(id=GUILD_ID))
+async def scan_cmd(interaction):
     await interaction.response.defer()
 
-    mode = get_user_mode(interaction.user.id)
+    mode = get_mode(interaction.user.id)
     results = []
 
     async with aiohttp.ClientSession() as session:
@@ -251,14 +254,14 @@ async def scan_cmd(interaction: discord.Interaction):
     )
 
 # -------------------------
-# OPPORTUNITIES (REPLACES BESTTRADE)
+# OPPORTUNITIES (REPLACED BESTTRADE)
 # -------------------------
 
-@bot.tree.command(name="opportunities", description="Best setups only", guild=discord.Object(id=GUILD_ID))
-async def opp_cmd(interaction: discord.Interaction):
+@bot.tree.command(name="opportunities", description="High quality setups", guild=discord.Object(id=GUILD_ID))
+async def opp_cmd(interaction):
     await interaction.response.defer()
 
-    mode = get_user_mode(interaction.user.id)
+    mode = get_mode(interaction.user.id)
     results = []
     best = None
 
@@ -271,19 +274,18 @@ async def opp_cmd(interaction: discord.Interaction):
             c, h, l, v = data
             s, sig, *_ = score(c, h, l, v, mode)
 
-            # FILTER: only real opportunities
             if s >= 70:
                 results.append(f"{t}: {sig} ({int(s)})")
 
                 if not best or s > best[1]:
-                    best = (t, s, sig)
+                    best = (t, s)
 
     if not results:
         return await interaction.followup.send(
-            f"📊 MODE: {mode}\n\nNo high-confidence setups right now."
+            f"📊 MODE: {mode}\n\nNo strong setups right now."
         )
 
-    msg = "📊 HIGH QUALITY SETUPS\n\n" + "\n".join(results)
+    msg = "📊 TOP SETUPS\n\n" + "\n".join(results)
 
     if best:
         msg += f"\n\n🏆 BEST: {best[0]} ({int(best[1])})"
@@ -291,20 +293,20 @@ async def opp_cmd(interaction: discord.Interaction):
     await interaction.followup.send(msg)
 
 # -------------------------
-# SCALP (DETAILED)
+# SCALP (DETAILED QUICK SIGNAL)
 # -------------------------
 
-@bot.tree.command(name="scalp", description="Detailed signal", guild=discord.Object(id=GUILD_ID))
-async def scalp_cmd(interaction: discord.Interaction, symbol: str):
+@bot.tree.command(name="scalp", description="Fast analysis", guild=discord.Object(id=GUILD_ID))
+async def scalp_cmd(interaction, symbol: str):
     await interaction.response.defer()
 
-    mode = get_user_mode(interaction.user.id)
+    mode = get_mode(interaction.user.id)
 
     async with aiohttp.ClientSession() as session:
         data = await get_data(session, symbol)
 
     if not data:
-        return await interaction.followup.send("No data available")
+        return await interaction.followup.send("No data")
 
     c, h, l, v = data
     s, sig, vwap, rsi, macd, support, resistance = score(c, h, l, v, mode)
@@ -315,6 +317,48 @@ MODE: {mode}
 
 {sig} ({int(s)})
 
+VWAP {vwap:.2f}
+RSI {rsi:.1f}
+MACD {macd:.2f}
+Support {support:.2f}
+Resistance {resistance:.2f}"""
+    )
+
+# -------------------------
+# DETAIL (YOU ASKED FOR THIS)
+# -------------------------
+
+@bot.tree.command(name="detail", description="Full breakdown", guild=discord.Object(id=GUILD_ID))
+async def detail_cmd(interaction, symbol: str):
+    await interaction.response.defer()
+
+    mode = get_mode(interaction.user.id)
+
+    async with aiohttp.ClientSession() as session:
+        data = await get_data(session, symbol)
+
+    if not data:
+        return await interaction.followup.send("No data available")
+
+    c, h, l, v = data
+    s, sig, vwap, rsi, macd, support, resistance = score(c, h, l, v, mode)
+
+    why = []
+    if c[-1] > vwap:
+        why.append("Above VWAP (bullish)")
+    if rsi > 70:
+        why.append("Overbought RSI")
+    if macd > 0:
+        why.append("Bullish MACD")
+
+    await interaction.followup.send(
+        f"""{symbol} DETAIL ({mode})
+
+Signal: {sig} ({int(s)})
+
+Why:
+- """ + "\n- ".join(why) + f"""
+
 VWAP: {vwap:.2f}
 RSI: {rsi:.1f}
 MACD: {macd:.2f}
@@ -323,34 +367,26 @@ Resistance: {resistance:.2f}"""
     )
 
 # -------------------------
-# BREAKOUT
+# WATCHLIST (NOW USEFUL)
 # -------------------------
 
-@bot.tree.command(name="breakout", description="Breakout check", guild=discord.Object(id=GUILD_ID))
-async def breakout_cmd(interaction: discord.Interaction, symbol: str):
-    await interaction.response.defer()
+@bot.tree.command(name="watch", description="Add to watchlist", guild=discord.Object(id=GUILD_ID))
+async def watch_cmd(interaction, symbol: str):
+    watchlists.setdefault(interaction.user.id, [])
 
-    async with aiohttp.ClientSession() as session:
-        data = await get_data(session, symbol)
+    if symbol not in watchlists[interaction.user.id]:
+        watchlists[interaction.user.id].append(symbol)
 
-    if not data:
-        return await interaction.followup.send("No data")
+    await interaction.response.send_message(f"Added {symbol}")
 
-    c, h, l, v = data
-    _, r = levels(h, l)
+@bot.tree.command(name="watchlist", description="View watchlist", guild=discord.Object(id=GUILD_ID))
+async def watchlist_cmd(interaction):
+    items = watchlists.get(interaction.user.id, [])
 
-    msg = "🚀 BREAKOUT" if c[-1] > r * 0.995 else "📉 NO BREAKOUT"
+    if not items:
+        return await interaction.response.send_message("Empty watchlist")
 
-    await interaction.followup.send(msg)
-
-# -------------------------
-# WATCHLIST
-# -------------------------
-
-@bot.tree.command(name="watch", description="Watchlist", guild=discord.Object(id=GUILD_ID))
-async def watch_cmd(interaction: discord.Interaction, symbol: str):
-    watchlists.setdefault(interaction.user.id, []).append(symbol)
-    await interaction.response.send_message(f"Watching {symbol}")
+    await interaction.response.send_message("📌\n" + "\n".join(items))
 
 # =========================
 # SYNC (STABLE)
