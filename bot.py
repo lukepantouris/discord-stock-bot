@@ -206,6 +206,7 @@ async def scan_cmd(interaction: discord.Interaction):
 
     await safe_send(interaction, "\n".join(out))
 
+
 @bot.tree.command(name="scalp", description="Scalp signal", guild=discord.Object(id=GUILD_ID))
 async def scalp_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
@@ -228,6 +229,7 @@ Support {support:.2f}
 Resistance {resistance:.2f}"""
     )
 
+
 @bot.tree.command(name="breakout", description="Breakout check", guild=discord.Object(id=GUILD_ID))
 async def breakout_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
@@ -241,6 +243,7 @@ async def breakout_cmd(interaction: discord.Interaction, symbol: str):
 
     msg = "🚀 BREAKOUT" if c[-1] > r * 0.995 else "📉 NO BREAKOUT"
     await safe_send(interaction, msg)
+
 
 @bot.tree.command(name="besttrade", description="Best trade", guild=discord.Object(id=GUILD_ID))
 async def besttrade_cmd(interaction: discord.Interaction):
@@ -266,13 +269,14 @@ async def besttrade_cmd(interaction: discord.Interaction):
     out.append(f"\nBEST: {best[0]} ({best[1]})")
     await safe_send(interaction, "\n".join(out))
 
+
 @bot.tree.command(name="watch", description="Watchlist", guild=discord.Object(id=GUILD_ID))
 async def watch_cmd(interaction: discord.Interaction, symbol: str):
     watchlists.setdefault(interaction.user.id, []).append(symbol)
     await interaction.response.send_message(f"Watching {symbol}")
 
 # =========================
-# 🔥 FIXED SETUP HOOK (YOUR REQUEST)
+# ✅ FIXED STABLE SYNC (ONLY CHANGE)
 # =========================
 
 @bot.event
@@ -280,11 +284,12 @@ async def setup_hook():
     guild = discord.Object(id=GUILD_ID)
 
     try:
-        # 🔥 CLEAN OLD COMMANDS + RESYNC
-        bot.tree.clear_commands(guild=guild)
-        await bot.tree.sync(guild=guild)
+        # SAFE SYNC ONLY (NO CLEARING COMMANDS)
+        synced = await bot.tree.sync(guild=guild)
 
-        print("CLEAN SYNC COMPLETE")
+        print("SYNC OK")
+        print("Commands:", [c.name for c in synced])
+
     except Exception as e:
         print("SYNC ERROR:", e)
 
