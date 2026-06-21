@@ -4,6 +4,7 @@ from discord.ext import commands
 import aiohttp
 import statistics
 import yfinance as yf
+import asyncio
 
 # =========================
 # CONFIG
@@ -42,6 +43,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 user_modes = {}
 watchlists = {}
+price_cache = {}
 
 TICKERS = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
 
@@ -163,7 +165,7 @@ def breakout(price, resistance):
     return price > resistance * 0.995
 
 # =========================
-# SCORING
+# SCORING ENGINE
 # =========================
 
 def score(c, h, l, v, mode):
@@ -197,14 +199,66 @@ def score(c, h, l, v, mode):
     return s, sig, vwap, rsi, macd, support, resistance
 
 # =========================
+# ALERT SYSTEM (V6 CORE)
+# =========================
+
+async def alert_loop():
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        try:
+            async with aiohttp.ClientSession() as session:
+
+                for user_id, symbols in watchlists.items():
+
+                    for symbol in symbols:
+
+                        data = await get_data(session, symbol)
+                        if not data:
+                            continue
+
+                        c, h, l, v = data
+                        price = c[-1]
+
+                        old_price = price_cache.get(symbol)
+                        price_cache[symbol] = price
+
+                        if old_price:
+
+                            change = ((price - old_price) / old_price) * 100
+
+                            if abs(change) >= 1.0:
+
+                                try:
+                                    user = await bot.fetch_user(user_id)
+
+                                    await user.send(
+                                        f"🚨 ALERT {symbol}\n"
+                                        f"Move: {change:.2f}%\n"
+                                        f"Price: {price:.2f}"
+                                    )
+                                except:
+                                    pass
+
+            await asyncio.sleep(60)
+
+        except Exception as e:
+            print("ALERT LOOP ERROR:", e)
+            await asyncio.sleep(10)
+
+# =========================
 # COMMANDS
 # =========================
 
 @bot.tree.command(name="help", description="Commands", guild=discord.Object(id=GUILD_ID))
 async def help_cmd(interaction):
     await interaction.response.send_message(
-        "/mode /scan /opportunities /scalp /breakout /watch /watchlist /detail"
+        "/mode /scan /opportunities /scalp /breakout /detail /watch /watchlist"
     )
+
+# -------------------------
+# MODE
+# -------------------------
 
 @bot.tree.command(name="mode", description="Set mode", guild=discord.Object(id=GUILD_ID))
 async def mode_cmd(interaction, mode: str):
@@ -216,7 +270,7 @@ async def mode_cmd(interaction, mode: str):
         )
 
     user_modes[interaction.user.id] = mode
-    await interaction.response.send_message(f"Mode set → {mode}")
+    await interaction.response.send_message(f"Mode → {mode}")
 
 # -------------------------
 # SCAN
@@ -320,47 +374,26 @@ async def detail_cmd(interaction, symbol: str):
     )
 
 # -------------------------
-# WATCHLIST
+# WATCHLIST + ALERTS
 # -------------------------
 
-@bot.tree.command(name="watch", description="Add watchlist", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="watch", description="Add alert watch", guild=discord.Object(id=GUILD_ID))
 async def watch_cmd(interaction, symbol: str):
     watchlists.setdefault(interaction.user.id, [])
+
     if symbol not in watchlists[interaction.user.id]:
         watchlists[interaction.user.id].append(symbol)
 
-    await interaction.response.send_message(f"Added {symbol}")
+    await interaction.response.send_message(f"Watching {symbol}")
 
 @bot.tree.command(name="watchlist", description="View watchlist", guild=discord.Object(id=GUILD_ID))
 async def watchlist_cmd(interaction):
     items = watchlists.get(interaction.user.id, [])
+
     if not items:
-        return await interaction.response.send_message("Empty")
+        return await interaction.response.send_message("Empty watchlist")
 
     await interaction.response.send_message("\n".join(items))
-
-# =========================
-# RESET COMMAND (YOUR REQUEST)
-# =========================
-
-@bot.tree.command(name="reset_commands", description="CLEAR OLD COMMANDS", guild=discord.Object(id=GUILD_ID))
-async def reset_commands(interaction):
-    await interaction.response.defer()
-
-    try:
-        guild = discord.Object(id=GUILD_ID)
-
-        bot.tree.clear_commands(guild=guild)
-        await bot.tree.sync(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-
-        await interaction.followup.send(
-            "RESET COMPLETE. Restart bot.\n"
-            + ", ".join([c.name for c in synced])
-        )
-
-    except Exception as e:
-        await interaction.followup.send(str(e))
 
 # =========================
 # SYNC
@@ -377,6 +410,9 @@ async def setup_hook():
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+
+    # START ALERT LOOP
+    bot.loop.create_task(alert_loop())
 
 # =========================
 # RUN
