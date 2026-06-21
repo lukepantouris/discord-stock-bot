@@ -31,17 +31,17 @@ if not DISCORD_TOKEN:
     raise Exception("Missing DISCORD_TOKEN")
 
 # =========================
-# BOT (FIXED CORE)
+# BOT CORE
 # =========================
 
 intents = discord.Intents.default()
-
-# 🔥 CRITICAL FIX: MUST BE commands.Bot (NOT Client)
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+user_modes = {}
+watchlists = {}
 
 # =========================
-# SAFE FOLLOWUP
+# SAFE SEND
 # =========================
 
 async def safe_send(interaction, content):
@@ -49,7 +49,6 @@ async def safe_send(interaction, content):
         await interaction.followup.send(content)
     except:
         pass
-
 
 # =========================
 # DATA PROVIDERS
@@ -111,7 +110,6 @@ async def get_data(symbol):
         data = await yahoo(symbol)
 
     return data
-
 
 # =========================
 # INDICATORS
@@ -179,15 +177,13 @@ def score(c, h, l, v):
 
     return s, sig, vwap, rsi, macd, support, resistance
 
-
 # =========================
-# COMMANDS (SLASH FIXED)
+# COMMANDS
 # =========================
 
 @bot.tree.command(name="help", description="Show commands", guild=discord.Object(id=GUILD_ID))
 async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message("scan / scalp / breakout / besttrade / watch")
-
 
 @bot.tree.command(name="scan", description="Market scan", guild=discord.Object(id=GUILD_ID))
 async def scan_cmd(interaction: discord.Interaction):
@@ -209,7 +205,6 @@ async def scan_cmd(interaction: discord.Interaction):
         out.append(f"{t}: {sig} ({s})")
 
     await safe_send(interaction, "\n".join(out))
-
 
 @bot.tree.command(name="scalp", description="Scalp signal", guild=discord.Object(id=GUILD_ID))
 async def scalp_cmd(interaction: discord.Interaction, symbol: str):
@@ -233,7 +228,6 @@ Support {support:.2f}
 Resistance {resistance:.2f}"""
     )
 
-
 @bot.tree.command(name="breakout", description="Breakout check", guild=discord.Object(id=GUILD_ID))
 async def breakout_cmd(interaction: discord.Interaction, symbol: str):
     await interaction.response.defer()
@@ -247,7 +241,6 @@ async def breakout_cmd(interaction: discord.Interaction, symbol: str):
 
     msg = "🚀 BREAKOUT" if c[-1] > r * 0.995 else "📉 NO BREAKOUT"
     await safe_send(interaction, msg)
-
 
 @bot.tree.command(name="besttrade", description="Best trade", guild=discord.Object(id=GUILD_ID))
 async def besttrade_cmd(interaction: discord.Interaction):
@@ -273,14 +266,13 @@ async def besttrade_cmd(interaction: discord.Interaction):
     out.append(f"\nBEST: {best[0]} ({best[1]})")
     await safe_send(interaction, "\n".join(out))
 
-
 @bot.tree.command(name="watch", description="Watchlist", guild=discord.Object(id=GUILD_ID))
 async def watch_cmd(interaction: discord.Interaction, symbol: str):
+    watchlists.setdefault(interaction.user.id, []).append(symbol)
     await interaction.response.send_message(f"Watching {symbol}")
 
-
 # =========================
-# SYNC FIX (THIS IS IMPORTANT)
+# 🔥 FIXED SETUP HOOK (YOUR REQUEST)
 # =========================
 
 @bot.event
@@ -288,16 +280,17 @@ async def setup_hook():
     guild = discord.Object(id=GUILD_ID)
 
     try:
+        # 🔥 CLEAN OLD COMMANDS + RESYNC
+        bot.tree.clear_commands(guild=guild)
         await bot.tree.sync(guild=guild)
-        print("SYNC OK")
+
+        print("CLEAN SYNC COMPLETE")
     except Exception as e:
         print("SYNC ERROR:", e)
-
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-
 
 # =========================
 # RUN
