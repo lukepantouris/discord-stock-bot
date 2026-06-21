@@ -50,35 +50,18 @@ price_cache = {}
 MODES = ["investing", "swing", "day", "scalp"]
 
 # =========================
-# MARKET UNIVERSE (V9 EXPANDED)
+# MARKET UNIVERSE
 # =========================
 
 TICKERS = [
-    # Mega Tech
     "AAPL", "MSFT", "NVDA", "AMD", "GOOGL", "META", "AMZN",
-
-    # ETFs
     "SPY", "QQQ", "IWM", "DIA",
-
-    # Finance
     "JPM", "BAC", "WFC", "GS", "C",
-
-    # Retail
     "TSLA", "COST", "WMT", "HD", "TGT",
-
-    # Healthcare
     "UNH", "PFE", "JNJ", "MRK",
-
-    # Energy
     "XOM", "CVX", "COP",
-
-    # Semis
     "AVGO", "INTC", "QCOM",
-
-    # Growth / Volatile
     "PLTR", "SOFI", "RIVN",
-
-    # Other large caps
     "NFLX", "DIS", "ORCL", "ADBE"
 ]
 
@@ -187,7 +170,7 @@ def breakout(price, resistance):
     return price > resistance * 0.995
 
 # =========================
-# V9 SYMMETRIC SCORING ENGINE
+# V11 MODE ENGINE (V10 FIX INCLUDED)
 # =========================
 
 def score(c, h, l, v, mode):
@@ -199,47 +182,87 @@ def score(c, h, l, v, mode):
     bullish = 0
     bearish = 0
 
-    # VWAP symmetry
+    # =========================
+    # BASE SIGNAL CORE
+    # =========================
+
     if price > vwap:
         bullish += 1
     else:
         bearish += 1
 
-    # RSI symmetry
-    if rsi < 30:
-        bullish += 2
-    elif rsi > 70:
-        bearish += 2
-    else:
-        if rsi > 50:
-            bullish += 1
-        else:
-            bearish += 1
-
-    # MACD symmetry
     if macd > 0:
         bullish += 2
     else:
         bearish += 2
 
-    # breakout vs breakdown
-    if breakout(price, resistance):
-        bullish += 3
-    elif price < support * 1.005:
-        bearish += 3
+    # =========================
+    # INVESTING MODE (TREND FOLLOW)
+    # =========================
+    if mode == "investing":
+        if rsi < 40:
+            bullish += 1
+        elif rsi > 60:
+            bearish += 1
+
+        if breakout(price, resistance):
+            bullish += 3
+
+    # =========================
+    # SWING MODE (MEAN REVERSION + CONFIRMATION)
+    # =========================
+    elif mode == "swing":
+        if rsi < 35:
+            bullish += 2
+        elif rsi > 65:
+            bearish += 2
+
+        if breakout(price, resistance):
+            bullish += 1
+        else:
+            bearish += 1
+
+    # =========================
+    # DAY MODE (MOMENTUM HEAVY)
+    # =========================
+    elif mode == "day":
+        if rsi > 55:
+            bullish += 2
+        elif rsi < 45:
+            bearish += 2
+
+        if breakout(price, resistance):
+            bullish += 3
+
+    # =========================
+    # SCALP MODE (VOLATILITY / MICRO ACTION)
+    # =========================
+    elif mode == "scalp":
+        if rsi > 50:
+            bullish += 1
+        else:
+            bearish += 1
+
+        if abs(rsi - 50) < 10:
+            bearish += 1
+
+        if breakout(price, resistance):
+            bullish += 2
+        else:
+            bearish += 2
+
+    # =========================
+    # FINAL SCORE BALANCE
+    # =========================
 
     raw = bullish - bearish
 
-    # mode tuning
-    if mode == "scalp":
-        raw *= 1.5
-    elif mode == "day":
-        raw *= 1.2
-    elif mode == "investing":
-        raw *= 0.9
-
     score = 50 + (raw * 12)
     score = max(0, min(100, score))
+
+    # =========================
+    # SIGNAL OUTPUT
+    # =========================
 
     if score >= 75:
         sig = "🔥 STRONG BUY"
