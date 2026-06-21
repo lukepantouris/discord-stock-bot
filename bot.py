@@ -163,7 +163,7 @@ def breakout(price, resistance):
     return price > resistance * 0.995
 
 # =========================
-# SCORING (MODE AWARE)
+# SCORING
 # =========================
 
 def score(c, h, l, v, mode):
@@ -200,34 +200,26 @@ def score(c, h, l, v, mode):
 # COMMANDS
 # =========================
 
-@bot.tree.command(name="help", description="All commands", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="help", description="Commands", guild=discord.Object(id=GUILD_ID))
 async def help_cmd(interaction):
     await interaction.response.send_message(
         "/mode /scan /opportunities /scalp /breakout /watch /watchlist /detail"
     )
 
-# -------------------------
-# MODE (FIXED UX)
-# -------------------------
-
-@bot.tree.command(name="mode", description="Set trading mode", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="mode", description="Set mode", guild=discord.Object(id=GUILD_ID))
 async def mode_cmd(interaction, mode: str):
     mode = mode.lower()
 
     if mode not in MODES:
         return await interaction.response.send_message(
-            "Modes:\n"
-            "- investing (safe long term)\n"
-            "- swing (balanced default)\n"
-            "- day (fast)\n"
-            "- scalp (very fast)"
+            "Modes:\ninvesting\nswing\nday\nscalp"
         )
 
     user_modes[interaction.user.id] = mode
     await interaction.response.send_message(f"Mode set → {mode}")
 
 # -------------------------
-# SCAN (MARKET OVERVIEW)
+# SCAN
 # -------------------------
 
 @bot.tree.command(name="scan", description="Market scan", guild=discord.Object(id=GUILD_ID))
@@ -250,20 +242,19 @@ async def scan_cmd(interaction):
             results.append(f"{t}: {sig} ({int(s)})")
 
     await interaction.followup.send(
-        f"📊 MODE: {mode.upper()}\n\n" + "\n".join(results)
+        f"MODE: {mode}\n\n" + "\n".join(results)
     )
 
 # -------------------------
-# OPPORTUNITIES (REPLACED BESTTRADE)
+# OPPORTUNITIES
 # -------------------------
 
-@bot.tree.command(name="opportunities", description="High quality setups", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="opportunities", description="Top setups", guild=discord.Object(id=GUILD_ID))
 async def opp_cmd(interaction):
     await interaction.response.defer()
 
     mode = get_mode(interaction.user.id)
     results = []
-    best = None
 
     async with aiohttp.ClientSession() as session:
         for t in TICKERS:
@@ -277,26 +268,16 @@ async def opp_cmd(interaction):
             if s >= 70:
                 results.append(f"{t}: {sig} ({int(s)})")
 
-                if not best or s > best[1]:
-                    best = (t, s)
-
     if not results:
-        return await interaction.followup.send(
-            f"📊 MODE: {mode}\n\nNo strong setups right now."
-        )
+        return await interaction.followup.send("No setups")
 
-    msg = "📊 TOP SETUPS\n\n" + "\n".join(results)
-
-    if best:
-        msg += f"\n\n🏆 BEST: {best[0]} ({int(best[1])})"
-
-    await interaction.followup.send(msg)
+    await interaction.followup.send("\n".join(results))
 
 # -------------------------
-# SCALP (DETAILED QUICK SIGNAL)
+# SCALP
 # -------------------------
 
-@bot.tree.command(name="scalp", description="Fast analysis", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="scalp", description="Quick signal", guild=discord.Object(id=GUILD_ID))
 async def scalp_cmd(interaction, symbol: str):
     await interaction.response.defer()
 
@@ -312,20 +293,11 @@ async def scalp_cmd(interaction, symbol: str):
     s, sig, vwap, rsi, macd, support, resistance = score(c, h, l, v, mode)
 
     await interaction.followup.send(
-        f"""{symbol}
-MODE: {mode}
-
-{sig} ({int(s)})
-
-VWAP {vwap:.2f}
-RSI {rsi:.1f}
-MACD {macd:.2f}
-Support {support:.2f}
-Resistance {resistance:.2f}"""
+        f"{symbol}\n{sig} ({int(s)})\nVWAP {vwap:.2f}\nRSI {rsi:.1f}"
     )
 
 # -------------------------
-# DETAIL (YOU ASKED FOR THIS)
+# DETAIL
 # -------------------------
 
 @bot.tree.command(name="detail", description="Full breakdown", guild=discord.Object(id=GUILD_ID))
@@ -338,42 +310,22 @@ async def detail_cmd(interaction, symbol: str):
         data = await get_data(session, symbol)
 
     if not data:
-        return await interaction.followup.send("No data available")
+        return await interaction.followup.send("No data")
 
     c, h, l, v = data
     s, sig, vwap, rsi, macd, support, resistance = score(c, h, l, v, mode)
 
-    why = []
-    if c[-1] > vwap:
-        why.append("Above VWAP (bullish)")
-    if rsi > 70:
-        why.append("Overbought RSI")
-    if macd > 0:
-        why.append("Bullish MACD")
-
     await interaction.followup.send(
-        f"""{symbol} DETAIL ({mode})
-
-Signal: {sig} ({int(s)})
-
-Why:
-- """ + "\n- ".join(why) + f"""
-
-VWAP: {vwap:.2f}
-RSI: {rsi:.1f}
-MACD: {macd:.2f}
-Support: {support:.2f}
-Resistance: {resistance:.2f}"""
+        f"{symbol} DETAIL\n{sig} ({int(s)})\nVWAP {vwap:.2f}\nRSI {rsi:.1f}"
     )
 
 # -------------------------
-# WATCHLIST (NOW USEFUL)
+# WATCHLIST
 # -------------------------
 
-@bot.tree.command(name="watch", description="Add to watchlist", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="watch", description="Add watchlist", guild=discord.Object(id=GUILD_ID))
 async def watch_cmd(interaction, symbol: str):
     watchlists.setdefault(interaction.user.id, [])
-
     if symbol not in watchlists[interaction.user.id]:
         watchlists[interaction.user.id].append(symbol)
 
@@ -382,22 +334,43 @@ async def watch_cmd(interaction, symbol: str):
 @bot.tree.command(name="watchlist", description="View watchlist", guild=discord.Object(id=GUILD_ID))
 async def watchlist_cmd(interaction):
     items = watchlists.get(interaction.user.id, [])
-
     if not items:
-        return await interaction.response.send_message("Empty watchlist")
+        return await interaction.response.send_message("Empty")
 
-    await interaction.response.send_message("📌\n" + "\n".join(items))
+    await interaction.response.send_message("\n".join(items))
 
 # =========================
-# SYNC (STABLE)
+# RESET COMMAND (YOUR REQUEST)
+# =========================
+
+@bot.tree.command(name="reset_commands", description="CLEAR OLD COMMANDS", guild=discord.Object(id=GUILD_ID))
+async def reset_commands(interaction):
+    await interaction.response.defer()
+
+    try:
+        guild = discord.Object(id=GUILD_ID)
+
+        bot.tree.clear_commands(guild=guild)
+        await bot.tree.sync(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+
+        await interaction.followup.send(
+            "RESET COMPLETE. Restart bot.\n"
+            + ", ".join([c.name for c in synced])
+        )
+
+    except Exception as e:
+        await interaction.followup.send(str(e))
+
+# =========================
+# SYNC
 # =========================
 
 @bot.event
 async def setup_hook():
     try:
         synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-        print("SYNC OK")
-        print([c.name for c in synced])
+        print("SYNC OK:", [c.name for c in synced])
     except Exception as e:
         print("SYNC ERROR:", e)
 
