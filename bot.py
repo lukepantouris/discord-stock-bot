@@ -30,6 +30,9 @@ if alpaca_enabled:
 if not DISCORD_TOKEN:
     raise Exception("Missing DISCORD_TOKEN")
 
+# 🔥 ADDED LINE (ADMIN CONTROL)
+ADMIN_ID = 1478514616718856244
+
 # =========================
 # BOT CORE
 # =========================
@@ -44,9 +47,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 user_modes = {}
 watchlists = {}
 price_cache = {}
-
-alert_channels = {}      # guild_id -> channel_id
-alert_modes = {}          # user_id -> watchlist/top/both
 
 TICKERS = ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"]
 
@@ -168,40 +168,41 @@ def breakout(price, resistance):
     return price > resistance * 0.995
 
 # =========================
-# SMART ALERT ENGINE (V7)
+# SCORING ENGINE
 # =========================
 
-def smart_signal_strength(c, h, l, v):
+def score(c, h, l, v, mode):
     vwap, rsi, macd = indicators(c, h, l, v)
     support, resistance = levels(h, l)
 
     price = c[-1]
+    s = 50
 
-    score = 50
-
-    score += 15 if price > vwap else -15
-    score += 10 if rsi > 70 else -10 if rsi < 30 else 0
-    score += 15 if macd > 0 else -15
+    s += 15 if price > vwap else -15
+    s += 10 if rsi > 70 else -10 if rsi < 30 else 0
+    s += 15 if macd > 0 else -15
 
     if breakout(price, resistance):
-        score += 20
+        s += 20
 
-    return max(0, min(100, score)), vwap, rsi
+    s = apply_mode(mode, s)
+    s = max(0, min(100, s))
 
-def volatility_score(c):
-    returns = [(c[i] - c[i-1]) / c[i-1] for i in range(1, len(c))]
-    return statistics.pstdev(returns) * 100 if len(returns) > 2 else 0
-
-def smart_threshold(volatility):
-    if volatility < 0.3:
-        return 1.5
-    elif volatility < 0.8:
-        return 1.2
+    if s >= 80:
+        sig = "🔥 STRONG BUY"
+    elif s >= 65:
+        sig = "⚡ BUY"
+    elif s <= 25:
+        sig = "❄ STRONG SELL"
+    elif s <= 40:
+        sig = "⚡ SELL"
     else:
-        return 0.9
+        sig = "⏸ HOLD"
+
+    return s, sig, vwap, rsi, macd, support, resistance
 
 # =========================
-# ALERT LOOP (V7)
+# ALERT SYSTEM
 # =========================
 
 async def alert_loop():
@@ -211,92 +212,36 @@ async def alert_loop():
         try:
             async with aiohttp.ClientSession() as session:
 
-                # =====================
-                # WATCHLIST ALERTS
-                # =====================
                 for user_id, symbols in watchlists.items():
 
-                    mode = alert_modes.get(user_id, "watchlist")
+                    for symbol in symbols:
 
-                    if mode in ["watchlist", "both"]:
+                        data = await get_data(session, symbol)
+                        if not data:
+                            continue
 
-                        for symbol in symbols:
+                        c, h, l, v = data
+                        price = c[-1]
 
-                            data = await get_data(session, symbol)
-                            if not data:
-                                continue
+                        old_price = price_cache.get(symbol)
+                        price_cache[symbol] = price
 
-                            c, h, l, v = data
-                            price = c[-1]
+                        if old_price:
 
-                            old_price = price_cache.get(symbol)
-                            price_cache[symbol] = price
+                            change = ((price - old_price) / old_price) * 100
 
-                            if old_price:
+                            if abs(change) >= 1.0:
 
-                                change = ((price - old_price) / old_price) * 100
-                                vol = volatility_score(c)
+                                try:
+                                    user = await bot.fetch_user(user_id)
 
-                                threshold = smart_threshold(vol)
-
-                                if abs(change) >= threshold:
-
-                                    try:
-                                        user = await bot.fetch_user(user_id)
-
-                                        await user.send(
-                                            f"🚨 WATCH ALERT {symbol}\n"
-                                            f"Move: {change:.2f}%\n"
-                                            f"Price: {price:.2f}\n"
-                                            f"Volatility: {vol:.2f}%"
-                                        )
-                                    except:
-                                        pass
-
-                # =====================
-                # TOP PICKS ALERTS
-                # =====================
-
-                top_results = []
-
-                for t in TICKERS:
-
-                    data = await get_data(session, t)
-                    if not data:
-                        continue
-
-                    c, h, l, v = data
-
-                    score, vwap, rsi = smart_signal_strength(c, h, l, v)
-
-                    vol = volatility_score(c)
-
-                    if score >= 75:
-                        top_results.append((t, score, vol))
-
-                # sort best setups
-                top_results.sort(key=lambda x: x[1], reverse=True)
-                top_results = top_results[:3]
-
-                for user_id, mode in alert_modes.items():
-
-                    if mode in ["top", "both"] and top_results:
-
-                        try:
-                            channel_id = alert_channels.get(GUILD_ID)
-                            if channel_id:
-                                channel = bot.get_channel(channel_id)
-
-                                if channel:
-                                    msg = "📊 TOP SETUPS\n"
-
-                                    for t, s, v in top_results:
-                                        msg += f"{t}: {s:.1f} (vol {v:.2f}%)\n"
-
-                                    await channel.send(msg)
-
-                        except:
-                            pass
+                                    await user.send(
+                                        f"🚨 ALERT {symbol}\n"
+                                        f"Move: {change:.2f}%\n"
+                                        f"Price: {price:.2f}"
+                                    )
+                                except:
+                                    pass
 
             await asyncio.sleep(60)
 
@@ -311,7 +256,7 @@ async def alert_loop():
 @bot.tree.command(name="help", description="Commands", guild=discord.Object(id=GUILD_ID))
 async def help_cmd(interaction):
     await interaction.response.send_message(
-        "/mode /scan /opportunities /scalp /detail /watch /watchlist /alerts set /alerts mode /top"
+        "/mode /scan /opportunities /scalp /breakout /detail /watch /watchlist"
     )
 
 @bot.tree.command(name="mode", description="Set mode", guild=discord.Object(id=GUILD_ID))
@@ -326,23 +271,31 @@ async def mode_cmd(interaction, mode: str):
     user_modes[interaction.user.id] = mode
     await interaction.response.send_message(f"Mode → {mode}")
 
-@bot.tree.command(name="alerts_set", description="Set alert channel", guild=discord.Object(id=GUILD_ID))
-async def alerts_set(interaction):
-    alert_channels[GUILD_ID] = interaction.channel.id
-    await interaction.response.send_message("Alerts channel set!")
-
-@bot.tree.command(name="alerts_mode", description="watchlist/top/both", guild=discord.Object(id=GUILD_ID))
-async def alerts_mode(interaction, mode: str):
-    mode = mode.lower()
-
-    if mode not in ["watchlist", "top", "both"]:
-        return await interaction.response.send_message("watchlist / top / both")
-
-    alert_modes[interaction.user.id] = mode
-    await interaction.response.send_message(f"Alert mode → {mode}")
-
 @bot.tree.command(name="scan", description="Market scan", guild=discord.Object(id=GUILD_ID))
 async def scan_cmd(interaction):
+    await interaction.response.defer()
+
+    mode = get_mode(interaction.user.id)
+    results = []
+
+    async with aiohttp.ClientSession() as session:
+        for t in TICKERS:
+            data = await get_data(session, t)
+            if not data:
+                results.append(f"{t}: NO DATA")
+                continue
+
+            c, h, l, v = data
+            s, sig, *_ = score(c, h, l, v, mode)
+
+            results.append(f"{t}: {sig} ({int(s)})")
+
+    await interaction.followup.send(
+        f"MODE: {mode}\n\n" + "\n".join(results)
+    )
+
+@bot.tree.command(name="opportunities", description="Top setups", guild=discord.Object(id=GUILD_ID))
+async def opp_cmd(interaction):
     await interaction.response.defer()
 
     mode = get_mode(interaction.user.id)
@@ -355,29 +308,10 @@ async def scan_cmd(interaction):
                 continue
 
             c, h, l, v = data
-            score, vwap, rsi = smart_signal_strength(c, h, l, v)
+            s, sig, *_ = score(c, h, l, v, mode)
 
-            results.append(f"{t}: {score:.1f}")
-
-    await interaction.followup.send(f"MODE: {mode}\n\n" + "\n".join(results))
-
-@bot.tree.command(name="top", description="Top setups", guild=discord.Object(id=GUILD_ID))
-async def top_cmd(interaction):
-    await interaction.response.defer()
-
-    results = []
-
-    async with aiohttp.ClientSession() as session:
-        for t in TICKERS:
-            data = await get_data(session, t)
-            if not data:
-                continue
-
-            c, h, l, v = data
-            score, vwap, rsi = smart_signal_strength(c, h, l, v)
-
-            if score >= 75:
-                results.append(f"{t}: {score:.1f}")
+            if s >= 70:
+                results.append(f"{t}: {sig} ({int(s)})")
 
     if not results:
         return await interaction.followup.send("No setups")
@@ -388,6 +322,8 @@ async def top_cmd(interaction):
 async def scalp_cmd(interaction, symbol: str):
     await interaction.response.defer()
 
+    mode = get_mode(interaction.user.id)
+
     async with aiohttp.ClientSession() as session:
         data = await get_data(session, symbol)
 
@@ -395,16 +331,18 @@ async def scalp_cmd(interaction, symbol: str):
         return await interaction.followup.send("No data")
 
     c, h, l, v = data
-    score, vwap, rsi = smart_signal_strength(c, h, l, v)
+    s, sig, vwap, rsi, macd, support, resistance = score(c, h, l, v, mode)
 
     await interaction.followup.send(
-        f"{symbol}\nScore: {score:.1f}\nVWAP {vwap:.2f}\nRSI {rsi:.1f}"
+        f"{symbol}\n{sig} ({int(s)})\nVWAP {vwap:.2f}\nRSI {rsi:.1f}"
     )
 
 @bot.tree.command(name="detail", description="Full breakdown", guild=discord.Object(id=GUILD_ID))
 async def detail_cmd(interaction, symbol: str):
     await interaction.response.defer()
 
+    mode = get_mode(interaction.user.id)
+
     async with aiohttp.ClientSession() as session:
         data = await get_data(session, symbol)
 
@@ -412,10 +350,10 @@ async def detail_cmd(interaction, symbol: str):
         return await interaction.followup.send("No data")
 
     c, h, l, v = data
-    score, vwap, rsi = smart_signal_strength(c, h, l, v)
+    s, sig, vwap, rsi, macd, support, resistance = score(c, h, l, v, mode)
 
     await interaction.followup.send(
-        f"{symbol}\nScore: {score:.1f}\nVWAP {vwap:.2f}\nRSI {rsi:.1f}"
+        f"{symbol} DETAIL\n{sig} ({int(s)})\nVWAP {vwap:.2f}\nRSI {rsi:.1f}"
     )
 
 @bot.tree.command(name="watch", description="Add alert watch", guild=discord.Object(id=GUILD_ID))
@@ -431,10 +369,7 @@ async def watch_cmd(interaction, symbol: str):
 async def watchlist_cmd(interaction):
     items = watchlists.get(interaction.user.id, [])
 
-    if not items:
-        return await interaction.response.send_message("Empty watchlist")
-
-    await interaction.response.send_message("\n".join(items))
+    await interaction.response.send_message("\n".join(items) if items else "Empty")
 
 # =========================
 # SYNC
@@ -451,12 +386,6 @@ async def setup_hook():
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-
-    print("===== GUILDS =====")
-    for guild in bot.guilds:
-        print(f"{guild.name} | {guild.id}")
-    print("==================")
-
     bot.loop.create_task(alert_loop())
 
 # =========================
