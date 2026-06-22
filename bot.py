@@ -38,10 +38,10 @@ user_modes = {}
 MODES = ["investing", "swing", "day", "scalp"]
 
 # =========================
-# UNIVERSE
+# UNIVERSE (base pool)
 # =========================
 
-TICKERS = [
+BASE_TICKERS = [
     "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AMD",
     "SPY","QQQ","IWM",
     "JPM","BAC","WFC","GS",
@@ -53,14 +53,39 @@ TICKERS = [
 ]
 
 # =========================
-# MODE
+# LIQUIDITY ENGINE (V15.3)
 # =========================
 
-def get_mode(uid):
-    return user_modes.get(uid, "swing")
+async def liquidity_score(symbol):
+    try:
+        t = yf.Ticker(symbol)
+        df = t.history(period="5d", interval="1h")
+
+        if df is None or len(df) < 10:
+            return 0
+
+        avg_vol = statistics.mean(df["Volume"].tolist())
+        price = df["Close"].iloc[-1]
+
+        return price * avg_vol
+
+    except:
+        return 0
+
+async def build_liquid_universe():
+    scored = []
+
+    for t in BASE_TICKERS:
+        score = await liquidity_score(t)
+        scored.append((t, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # top 200 simulation cap (you only have ~30 base anyway)
+    return [x[0] for x in scored[:200]]
 
 # =========================
-# DATA HELPERS
+# DATA ENGINE
 # =========================
 
 async def fetch_json(session, url, params=None):
@@ -71,10 +96,6 @@ async def fetch_json(session, url, params=None):
             return await r.json()
     except:
         return None
-
-# =========================
-# ALPACA (SCALP / DAY ONLY)
-# =========================
 
 async def alpaca_data(symbol):
     url = f"{BASE_URL}/stocks/{symbol}/bars"
@@ -107,26 +128,18 @@ async def alpaca_data(symbol):
         [b["v"] for b in bars],
     )
 
-# =========================
-# YAHOO (STABLE TIMEFRAME ENGINE)
-# =========================
-
 async def yahoo_data(symbol, mode):
     try:
         t = yf.Ticker(symbol)
 
         if mode == "investing":
             df = t.history(period="6mo", interval="1d")
-
         elif mode == "swing":
             df = t.history(period="3mo", interval="1h")
-
         elif mode == "day":
             df = t.history(period="5d", interval="15m")
-
         elif mode == "scalp":
-            return None  # scalp ONLY Alpaca
-
+            return None
         else:
             df = t.history(period="1mo", interval="1h")
 
@@ -143,10 +156,6 @@ async def yahoo_data(symbol, mode):
     except:
         return None
 
-# =========================
-# MASTER DATA ENGINE (V15.2 FIX)
-# =========================
-
 async def get_data(symbol, mode):
     if mode in ["scalp", "day"] and alpaca_enabled:
         data = await alpaca_data(symbol)
@@ -156,7 +165,14 @@ async def get_data(symbol, mode):
     return await yahoo_data(symbol, mode)
 
 # =========================
-# REGIME DETECTION
+# MODE
+# =========================
+
+def get_mode(uid):
+    return user_modes.get(uid, "swing")
+
+# =========================
+# REGIME
 # =========================
 
 def regime(c):
@@ -187,7 +203,7 @@ def indicators(c):
     return vwap, rsi
 
 # =========================
-# PATTERN ENGINE (UNCHANGED LOGIC)
+# PATTERNS
 # =========================
 
 def detect_patterns(c, h, l):
@@ -212,21 +228,15 @@ def detect_patterns(c, h, l):
         bear.append(("Bear Flag Breakdown", 3))
 
     if price >= high * 0.995:
-        bull.append(("Ascending Pressure Breakout", 3))
+        bull.append(("Ascending Breakout", 3))
 
-    if price <= low * 0.005:
+    if price <= low * 1.005:
         bear.append(("Descending Breakdown", 3))
-
-    if abs(c[-1] - max(c[-10:-2])) / price < 0.01:
-        bear.append(("Double Top Risk", 2))
-
-    if abs(c[-1] - min(c[-10:-2])) / price < 0.01:
-        bull.append(("Double Bottom Setup", 2))
 
     return bull, bear
 
 # =========================
-# SCORING ENGINE (STABLE)
+# SCORING
 # =========================
 
 def score(c, h, l, v, mode):
@@ -249,9 +259,7 @@ def score(c, h, l, v, mode):
     elif reg == "bear":
         bear *= 1.2
 
-    if mode == "investing":
-        bear *= 1.1
-    elif mode == "scalp":
+    if mode == "scalp":
         bull *= 1.2
         bear *= 1.2
 
@@ -271,16 +279,18 @@ def score(c, h, l, v, mode):
 # COMMANDS
 # =========================
 
-@bot.tree.command(name="scan", description="Scan market", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="scan", description="Liquidity scan", guild=discord.Object(id=GUILD_ID))
 async def scan(interaction):
     await interaction.response.defer()
 
     mode = get_mode(interaction.user.id)
 
+    universe = await build_liquid_universe()
+
     longs = []
     shorts = []
 
-    for t in TICKERS:
+    for t in universe:
         data = await get_data(t, mode)
         if not data:
             continue
@@ -304,7 +314,7 @@ async def scan(interaction):
     longs.sort(key=lambda x: x[1], reverse=True)
     shorts.sort(key=lambda x: x[1], reverse=True)
 
-    msg = f"MODE: {mode} | REGIME: {reg}\n\n📈 LONGS\n"
+    msg = f"MODE: {mode} | LIQUIDITY ENGINE ACTIVE\n\n📈 LONGS\n"
 
     for t, s in longs[:5]:
         msg += f"{t}: {int(s)}\n"
@@ -317,7 +327,37 @@ async def scan(interaction):
     await interaction.followup.send(msg)
 
 # =========================
-# MODE COMMAND
+# RATE COMMAND (RESTORED)
+# =========================
+
+@bot.tree.command(name="rate", description="Rate a stock", guild=discord.Object(id=GUILD_ID))
+async def rate(interaction, symbol: str):
+    await interaction.response.defer()
+
+    mode = get_mode(interaction.user.id)
+
+    data = await get_data(symbol, mode)
+    if not data:
+        return await interaction.followup.send("No data")
+
+    c, h, l, v = data
+
+    s, sig, reg = score(c, h, l, v, mode)
+
+    bull, bear = detect_patterns(c, h, l)
+
+    msg = (
+        f"{symbol}\n"
+        f"{sig} ({int(s)})\n"
+        f"REGIME: {reg}\n"
+        f"BULL PATTERNS: {len(bull)}\n"
+        f"BEAR PATTERNS: {len(bear)}"
+    )
+
+    await interaction.followup.send(msg)
+
+# =========================
+# MODE
 # =========================
 
 @bot.tree.command(name="mode", description="Set mode", guild=discord.Object(id=GUILD_ID))
