@@ -4,7 +4,6 @@ from discord.ext import commands
 import aiohttp
 import statistics
 import yfinance as yf
-import asyncio
 
 # =========================
 # CONFIG
@@ -12,7 +11,6 @@ import asyncio
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = 1516963264486183053
-ADMIN_ID = 1478514616718856244
 
 if not DISCORD_TOKEN:
     raise Exception("Missing DISCORD_TOKEN")
@@ -29,32 +27,23 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # =========================
 
 user_modes = {}
-watchlists = {}
-price_cache = {}
 
 MODES = ["investing", "swing", "day", "scalp"]
 
 # =========================
-# UNIVERSE (safe for 512MB)
+# UNIVERSE (safe 512MB)
 # =========================
 
 TICKERS = [
-    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AMD","AVGO","NFLX",
+    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","TSLA","AMD",
     "SPY","QQQ","IWM",
     "JPM","BAC","WFC","GS",
     "XOM","CVX",
     "UNH","PFE","JNJ",
-    "COST","WMT","HD","TGT",
+    "COST","WMT","HD",
     "INTC","QCOM","ORCL","ADBE",
-    "PLTR","SOFI","RIVN","UBER","LYFT"
+    "PLTR","SOFI","RIVN"
 ]
-
-# =========================
-# MODE
-# =========================
-
-def get_mode(uid):
-    return user_modes.get(uid, "swing")
 
 # =========================
 # DATA
@@ -65,7 +54,7 @@ async def yahoo(symbol):
         t = yf.Ticker(symbol)
         df = t.history(period="1d", interval="5m")
 
-        if df is None or len(df) < 25:
+        if df is None or len(df) < 30:
             return None
 
         return (
@@ -81,128 +70,149 @@ async def get_data(symbol):
     return await yahoo(symbol)
 
 # =========================
+# MODE
+# =========================
+
+def get_mode(uid):
+    return user_modes.get(uid, "swing")
+
+# =========================
+# MARKET REGIME
+# =========================
+
+def regime(c):
+    short = statistics.mean(c[-10:])
+    long = statistics.mean(c[-30:])
+
+    if short > long * 1.01:
+        return "bull"
+    elif short < long * 0.99:
+        return "bear"
+    return "chop"
+
+# =========================
 # INDICATORS
 # =========================
 
-def indicators(c, h, l, v):
+def indicators(c):
     vwap = sum(c) / len(c)
 
-    gains = []
-    losses = []
-
-    for i in range(1, len(c)):
-        diff = c[i] - c[i-1]
-        if diff > 0:
-            gains.append(diff)
-        else:
-            losses.append(abs(diff))
+    gains = [max(c[i] - c[i-1], 0) for i in range(1, len(c))]
+    losses = [max(c[i-1] - c[i], 0) for i in range(1, len(c))]
 
     avg_g = sum(gains[-14:]) / 14 if gains else 0
     avg_l = sum(losses[-14:]) / 14 if losses else 1
 
     rsi = 100 - (100 / (1 + (avg_g / avg_l)))
 
-    macd = statistics.mean(c[-12:]) - statistics.mean(c[-26:]) if len(c) >= 26 else 0
-
-    return vwap, rsi, macd
+    return vwap, rsi
 
 # =========================
-# MARKET REGIME (NEW IN V13)
-# =========================
-
-def market_regime(c):
-    short = statistics.mean(c[-10:])
-    long = statistics.mean(c[-30:]) if len(c) >= 30 else short
-
-    if short > long * 1.01:
-        return "bull"
-    elif short < long * 0.99:
-        return "bear"
-    else:
-        return "chop"
-
-# =========================
-# PATTERN ENGINE (REAL V13)
+# PATTERN ENGINE V14 (REAL STRUCTURE LOGIC)
 # =========================
 
 def detect_patterns(c, h, l):
-    patterns = {"bull": [], "bear": []}
+    bull = []
+    bear = []
 
     high = max(h[-20:])
     low = min(l[-20:])
     price = c[-1]
 
-    # Trend
+    mid = statistics.mean(c[-20:])
+
+    # =========================
+    # TREND STRUCTURE
+    # =========================
+
     if c[-1] > c[-5] > c[-10]:
-        patterns["bull"].append("Momentum Uptrend")
+        bull.append(("Uptrend Structure", 2))
     if c[-1] < c[-5] < c[-10]:
-        patterns["bear"].append("Momentum Downtrend")
+        bear.append(("Downtrend Structure", 2))
 
-    # Breakouts
+    # =========================
+    # FLAGS
+    # =========================
+
+    if price > mid and c[-5] < mid:
+        bull.append(("Bull Flag Breakout", 3))
+
+    if price < mid and c[-5] > mid:
+        bear.append(("Bear Flag Breakdown", 3))
+
+    # =========================
+    # TRIANGLES
+    # =========================
+
     if price >= high * 0.995:
-        patterns["bull"].append("Breakout High")
+        bull.append(("Ascending Pressure Breakout", 3))
+
     if price <= low * 1.005:
-        patterns["bear"].append("Breakdown Low")
+        bear.append(("Descending Breakdown", 3))
 
-    # Mean reversion signals
-    mean = statistics.mean(c[-20:])
-    if price > mean:
-        patterns["bull"].append("Above Mean Strength")
-    else:
-        patterns["bear"].append("Below Mean Weakness")
+    # =========================
+    # DOUBLE TOP / BOTTOM
+    # =========================
 
-    # Simple structure patterns
-    if c[-1] > c[-3] and c[-3] < c[-6]:
-        patterns["bull"].append("Local Reversal Up")
-    if c[-1] < c[-3] and c[-3] > c[-6]:
-        patterns["bear"].append("Local Reversal Down")
+    if abs(c[-1] - max(c[-10:-2])) / price < 0.01:
+        bear.append(("Double Top Risk", 2))
 
-    return patterns
+    if abs(c[-1] - min(c[-10:-2])) / price < 0.01:
+        bull.append(("Double Bottom Setup", 2))
+
+    # =========================
+    # HEAD & SHOULDERS (SIMPLIFIED DETECTION)
+    # =========================
+
+    if c[-8] < c[-5] > c[-2] and c[-5] == max(c[-10:]):
+        bear.append(("Head & Shoulders Risk", 3))
+
+    if c[-8] > c[-5] < c[-2] and c[-5] == min(c[-10:]):
+        bull.append(("Inverse H&S Setup", 3))
+
+    # =========================
+    # WEDGES
+    # =========================
+
+    if h[-1] < h[-5] and l[-1] > l[-5]:
+        bull.append(("Falling Wedge Breakout Setup", 3))
+
+    if h[-1] > h[-5] and l[-1] < l[-5]:
+        bear.append(("Rising Wedge Breakdown Setup", 3))
+
+    return bull, bear
 
 # =========================
-# SCORING ENGINE (FIXED BALANCE)
+# SCORING ENGINE
 # =========================
 
 def score(c, h, l, v, mode):
-    vwap, rsi, macd = indicators(c, h, l, v)
-    regime = market_regime(c)
+    vwap, rsi = indicators(c)
+    reg = regime(c)
 
     price = c[-1]
 
     bull = 0
     bear = 0
 
-    # BASE
     bull += 1 if price > vwap else 0
     bear += 1 if price < vwap else 0
 
-    bull += 2 if macd > 0 else 0
-    bear += 2 if macd < 0 else 0
+    bull += 2 if rsi < 45 else 0
+    bear += 2 if rsi > 55 else 0
 
-    # RSI logic
-    if rsi < 40:
-        bull += 2
-    elif rsi > 60:
-        bear += 2
-
-    # MODE ADJUSTMENTS
-    if mode == "investing":
-        bull *= 0.9
-        bear *= 1.1
-    elif mode == "day":
-        bull *= 1.1
-        bear *= 1.1
-    elif mode == "scalp":
-        bull *= 1.25
-        bear *= 1.25
-
-    # REGIME FILTER
-    if regime == "bull":
+    if reg == "bull":
         bull *= 1.2
-    elif regime == "bear":
+    elif reg == "bear":
         bear *= 1.2
 
-    score = 50 + (bull - bear) * 12
+    if mode == "investing":
+        bear *= 1.1
+    elif mode == "scalp":
+        bull *= 1.2
+        bear *= 1.2
+
+    score = 50 + (bull - bear) * 10
     score = max(0, min(100, score))
 
     if score >= 70:
@@ -212,7 +222,7 @@ def score(c, h, l, v, mode):
     else:
         sig = "⏸ NO TRADE"
 
-    return score, sig, regime
+    return score, sig, reg
 
 # =========================
 # COMMANDS
@@ -233,17 +243,25 @@ async def scan(interaction):
             continue
 
         c, h, l, v = data
-        s, sig, regime = score(c, h, l, v, mode)
 
-        if s >= 60:
-            longs.append((t, s))
-        elif s <= 40:
-            shorts.append((t, s))
+        s, sig, reg = score(c, h, l, v, mode)
+        bull_p, bear_p = detect_patterns(c, h, l)
+
+        bull_score = sum(x[1] for x in bull_p)
+        bear_score = sum(x[1] for x in bear_p)
+
+        final_bull = s + bull_score * 2
+        final_bear = (100 - s) + bear_score * 2
+
+        if final_bull > final_bear:
+            longs.append((t, final_bull))
+        else:
+            shorts.append((t, final_bear))
 
     longs.sort(key=lambda x: x[1], reverse=True)
-    shorts.sort(key=lambda x: x[1])
+    shorts.sort(key=lambda x: x[1], reverse=True)
 
-    msg = f"MODE: {mode}\nREGIME: {regime}\n\n📈 LONGS\n"
+    msg = f"MODE: {mode} | REGIME: {reg}\n\n📈 LONGS\n"
 
     for t, s in longs[:5]:
         msg += f"{t}: {int(s)}\n"
@@ -255,15 +273,7 @@ async def scan(interaction):
 
     await interaction.followup.send(msg)
 
-@bot.tree.command(name="longs", description="Top longs", guild=discord.Object(id=GUILD_ID))
-async def longs(interaction):
-    await scan(interaction)
-
-@bot.tree.command(name="shorts", description="Top shorts", guild=discord.Object(id=GUILD_ID))
-async def shorts(interaction):
-    await scan(interaction)
-
-@bot.tree.command(name="pattern", description="Detect patterns", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="pattern", description="Pattern scan", guild=discord.Object(id=GUILD_ID))
 async def pattern(interaction, symbol: str):
     await interaction.response.defer()
 
@@ -272,24 +282,23 @@ async def pattern(interaction, symbol: str):
         return await interaction.followup.send("No data")
 
     c, h, l, v = data
-    p = detect_patterns(c, h, l)
+    bull, bear = detect_patterns(c, h, l)
+
+    bull_txt = "\n".join([f"✅ {x[0]}" for x in bull]) or "None"
+    bear_txt = "\n".join([f"❌ {x[0]}" for x in bear]) or "None"
 
     await interaction.followup.send(
-        f"{symbol}\nBULL: {', '.join(p['bull'])}\nBEAR: {', '.join(p['bear'])}"
+        f"{symbol}\n\nBULL PATTERNS:\n{bull_txt}\n\nBEAR PATTERNS:\n{bear_txt}"
     )
 
 @bot.tree.command(name="mode", description="Set mode", guild=discord.Object(id=GUILD_ID))
-async def mode(interaction, mode: str):
+async def mode_cmd(interaction, mode: str):
     mode = mode.lower()
     if mode not in MODES:
         return await interaction.response.send_message("investing / swing / day / scalp")
 
     user_modes[interaction.user.id] = mode
     await interaction.response.send_message(f"Mode → {mode}")
-
-# =========================
-# SYNC
-# =========================
 
 @bot.event
 async def setup_hook():
