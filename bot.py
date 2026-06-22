@@ -68,8 +68,6 @@ async def yahoo(symbol):
     except:
         return None
 
-async def get_data(symbol):
-    return await yahoo(symbol)
 
 # =========================
 # MODE
@@ -77,6 +75,7 @@ async def get_data(symbol):
 
 def get_mode(uid):
     return user_modes.get(uid, "swing")
+
 
 # =========================
 # REGIME
@@ -92,12 +91,14 @@ def regime(c):
         return "bear"
     return "chop"
 
+
 def market_bias(reg):
     if reg == "bull":
         return 1.1, 0.95
     if reg == "bear":
         return 0.95, 1.1
     return 1.0, 1.0
+
 
 # =========================
 # INDICATORS
@@ -116,8 +117,9 @@ def indicators(c):
 
     return vwap, rsi
 
+
 # =========================
-# PATTERNS (V15 CORE KEPT)
+# PATTERNS (UNCHANGED CORE)
 # =========================
 
 def detect_patterns(c, h, l):
@@ -166,34 +168,44 @@ def detect_patterns(c, h, l):
 
     return bull, bear
 
+
 # =========================
-# EXPLANATION ENGINE (V17 NEW)
+# V17 EXPLANATION ENGINE (NEW)
 # =========================
 
 def explain(c, h, l):
     bull = []
     bear = []
 
-    vwap, rsi = indicators(c)
+    vwap = sum(c) / len(c)
     price = c[-1]
 
     if price > vwap:
-        bull.append("Price above VWAP")
+        bull.append("Price above VWAP (momentum bullish)")
     else:
-        bear.append("Price below VWAP")
-
-    if rsi < 45:
-        bull.append("RSI oversold rebound zone")
-    elif rsi > 55:
-        bear.append("RSI overbought pressure")
+        bear.append("Price below VWAP (bearish pressure)")
 
     if c[-1] > c[-5] > c[-10]:
         bull.append("Uptrend structure confirmed")
 
+    gains = [max(c[i] - c[i-1], 0) for i in range(1, len(c))]
+    losses = [max(c[i-1] - c[i], 0) for i in range(1, len(c))]
+
+    avg_g = sum(gains[-14:]) / 14 if gains else 0
+    avg_l = sum(losses[-14:]) / 14 if losses else 1
+
+    rsi = 100 - (100 / (1 + (avg_g / avg_l)))
+
+    if rsi < 45:
+        bull.append("RSI oversold bounce zone")
+    elif rsi > 55:
+        bear.append("RSI overbought pressure")
+
     return bull, bear
 
+
 # =========================
-# STABILITY (V16 FIX)
+# STABILITY LAYER (V16 FIX)
 # =========================
 
 def stabilize(symbol, score):
@@ -206,8 +218,17 @@ def stabilize(symbol, score):
     last_scores[symbol] = smoothed
     return smoothed
 
+
 # =========================
-# SCORING ENGINE
+# DATA WRAPPER
+# =========================
+
+async def get_data(symbol):
+    return await yahoo(symbol)
+
+
+# =========================
+# SCORE ENGINE
 # =========================
 
 def score(c, h, l, v, mode):
@@ -240,29 +261,9 @@ def score(c, h, l, v, mode):
 
     return score, reg
 
-# =========================
-# DATA WRAPPER
-# =========================
-
-async def get_data(symbol):
-    try:
-        t = yf.Ticker(symbol)
-        df = t.history(period="1d", interval="5m")
-
-        if df is None or len(df) < 30:
-            return None
-
-        return (
-            df["Close"].tolist(),
-            df["High"].tolist(),
-            df["Low"].tolist(),
-            df["Volume"].tolist(),
-        )
-    except:
-        return None
 
 # =========================
-# SCAN COMMAND (V17 FINAL)
+# COMMANDS (ALL KEPT)
 # =========================
 
 @bot.tree.command(name="scan", description="Scan market", guild=discord.Object(id=GUILD_ID))
@@ -322,9 +323,6 @@ async def scan(interaction):
 
     await interaction.followup.send(msg)
 
-# =========================
-# MODE COMMAND
-# =========================
 
 @bot.tree.command(name="mode", description="Set mode", guild=discord.Object(id=GUILD_ID))
 async def mode_cmd(interaction, mode: str):
@@ -334,6 +332,7 @@ async def mode_cmd(interaction, mode: str):
 
     user_modes[interaction.user.id] = mode
     await interaction.response.send_message(f"Mode → {mode}")
+
 
 # =========================
 # START
