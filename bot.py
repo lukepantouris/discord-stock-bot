@@ -5,6 +5,7 @@ import aiohttp
 import statistics
 import yfinance as yf
 import asyncio
+import time
 
 # =========================
 # CONFIG
@@ -30,7 +31,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 user_modes = {}
 MODES = ["investing", "swing", "day", "scalp"]
 
-last_scores = {}  # V16 stability layer
+last_cache = {}  # V18 cache system
+CACHE_TTL = 120  # 2 min refresh stability
 
 # =========================
 # UNIVERSE
@@ -48,15 +50,22 @@ TICKERS = [
 ]
 
 # =========================
-# DATA
+# MODE
+# =========================
+
+def get_mode(uid):
+    return user_modes.get(uid, "swing")
+
+# =========================
+# SAFE DATA LAYER (V18 FIX)
 # =========================
 
 async def yahoo(symbol):
     try:
         t = yf.Ticker(symbol)
-        df = t.history(period="1d", interval="5m")
+        df = t.history(period="5d", interval="5m")
 
-        if df is None or len(df) < 30:
+        if df is None or len(df) < 20:
             return None
 
         return (
@@ -65,23 +74,38 @@ async def yahoo(symbol):
             df["Low"].tolist(),
             df["Volume"].tolist(),
         )
-    except:
+
+    except Exception as e:
+        print(f"[YF ERROR] {symbol}: {e}")
         return None
 
+# =========================
+# CACHE SYSTEM (V18 CORE FIX)
+# =========================
+
+async def get_data(symbol):
+    now = time.time()
+
+    if symbol in last_cache:
+        data, ts = last_cache[symbol]
+        if now - ts < CACHE_TTL:
+            return data
+
+    data = await yahoo(symbol)
+
+    if data:
+        last_cache[symbol] = (data, now)
+
+    return data
 
 # =========================
-# MODE
-# =========================
-
-def get_mode(uid):
-    return user_modes.get(uid, "swing")
-
-
-# =========================
-# REGIME
+# REGIME DETECTION
 # =========================
 
 def regime(c):
+    if len(c) < 30:
+        return "chop"
+
     short = statistics.mean(c[-10:])
     long = statistics.mean(c[-30:])
 
@@ -90,15 +114,6 @@ def regime(c):
     elif short < long * 0.99:
         return "bear"
     return "chop"
-
-
-def market_bias(reg):
-    if reg == "bull":
-        return 1.1, 0.95
-    if reg == "bear":
-        return 0.95, 1.1
-    return 1.0, 1.0
-
 
 # =========================
 # INDICATORS
@@ -116,7 +131,6 @@ def indicators(c):
     rsi = 100 - (100 / (1 + (avg_g / avg_l)))
 
     return vwap, rsi
-
 
 # =========================
 # PATTERNS (UNCHANGED CORE)
@@ -168,12 +182,11 @@ def detect_patterns(c, h, l):
 
     return bull, bear
 
-
 # =========================
-# V17 EXPLANATION ENGINE (NEW)
+# EXPLANATION ENGINE
 # =========================
 
-def explain(c, h, l):
+def explain(c):
     bull = []
     bear = []
 
@@ -181,54 +194,17 @@ def explain(c, h, l):
     price = c[-1]
 
     if price > vwap:
-        bull.append("Price above VWAP (momentum bullish)")
+        bull.append("Price above VWAP → bullish momentum bias")
     else:
-        bear.append("Price below VWAP (bearish pressure)")
+        bear.append("Price below VWAP → bearish pressure")
 
     if c[-1] > c[-5] > c[-10]:
         bull.append("Uptrend structure confirmed")
 
-    gains = [max(c[i] - c[i-1], 0) for i in range(1, len(c))]
-    losses = [max(c[i-1] - c[i], 0) for i in range(1, len(c))]
-
-    avg_g = sum(gains[-14:]) / 14 if gains else 0
-    avg_l = sum(losses[-14:]) / 14 if losses else 1
-
-    rsi = 100 - (100 / (1 + (avg_g / avg_l)))
-
-    if rsi < 45:
-        bull.append("RSI oversold bounce zone")
-    elif rsi > 55:
-        bear.append("RSI overbought pressure")
-
     return bull, bear
 
-
 # =========================
-# STABILITY LAYER (V16 FIX)
-# =========================
-
-def stabilize(symbol, score):
-    old = last_scores.get(symbol)
-    if old is None:
-        last_scores[symbol] = score
-        return score
-
-    smoothed = (old * 0.65) + (score * 0.35)
-    last_scores[symbol] = smoothed
-    return smoothed
-
-
-# =========================
-# DATA WRAPPER
-# =========================
-
-async def get_data(symbol):
-    return await yahoo(symbol)
-
-
-# =========================
-# SCORE ENGINE
+# SCORING ENGINE
 # =========================
 
 def score(c, h, l, v, mode):
@@ -246,24 +222,24 @@ def score(c, h, l, v, mode):
     bull += 2 if rsi < 45 else 0
     bear += 2 if rsi > 55 else 0
 
-    bull_mult, bear_mult = market_bias(reg)
-    bull *= bull_mult
-    bear *= bear_mult
+    if reg == "bull":
+        bull *= 1.1
+    elif reg == "bear":
+        bear *= 1.1
 
     if mode == "investing":
         bear *= 1.05
     elif mode == "scalp":
-        bull *= 1.15
-        bear *= 1.15
+        bull *= 1.1
+        bear *= 1.1
 
     score = 50 + (bull - bear) * 10
     score = max(0, min(100, score))
 
     return score, reg
 
-
 # =========================
-# COMMANDS (ALL KEPT)
+# SCAN COMMAND (V18 FIXED OUTPUT)
 # =========================
 
 @bot.tree.command(name="scan", description="Scan market", guild=discord.Object(id=GUILD_ID))
@@ -274,6 +250,7 @@ async def scan(interaction):
 
     longs = []
     shorts = []
+    failed = 0
 
     async def process(t):
         data = await get_data(t)
@@ -284,45 +261,55 @@ async def scan(interaction):
 
         s, reg = score(c, h, l, v, mode)
         bull_p, bear_p = detect_patterns(c, h, l)
-        bull_ex, bear_ex = explain(c, h, l)
+        bull_ex, bear_ex = explain(c)
 
         bull_score = sum(x[1] for x in bull_p)
         bear_score = sum(x[1] for x in bear_p)
 
-        final_bull = stabilize(t, s + bull_score * 2)
-        final_bear = stabilize(t + "_b", (100 - s) + bear_score * 2)
+        final_bull = s + bull_score * 2
+        final_bear = (100 - s) + bear_score * 2
 
-        return t, final_bull, final_bear, bull_ex, bear_ex
+        if final_bull > final_bear:
+            longs.append((t, final_bull, bull_ex))
+        else:
+            shorts.append((t, final_bear, bear_ex))
 
     tasks = [process(t) for t in TICKERS]
     results = await asyncio.gather(*tasks)
 
     for r in results:
         if not r:
-            continue
-
-        t, fb, fs, bull_ex, bear_ex = r
-
-        if fb > fs:
-            longs.append((t, fb, bull_ex))
-        else:
-            shorts.append((t, fs, bear_ex))
+            failed += 1
 
     longs.sort(key=lambda x: x[1], reverse=True)
     shorts.sort(key=lambda x: x[1], reverse=True)
 
-    msg = f"MODE: {mode} | V17 ENGINE\n\n📈 LONGS\n"
+    # =========================
+    # OUTPUT (FIXED EMPTY BUG)
+    # =========================
 
-    for t, s, why in longs[:5]:
-        msg += f"\n{t}: {int(s)}\nWHY:\n- " + "\n- ".join(why[:3]) + "\n"
+    msg = f"MODE: {mode} | V18 ENGINE\n"
+    msg += f"ACTIVE: {len(TICKERS)-failed}/{len(TICKERS)}\n\n"
+
+    msg += "📈 LONGS\n"
+    if not longs:
+        msg += "No strong long setups\n"
+    else:
+        for t, s, why in longs[:5]:
+            msg += f"\n{t}: {int(s)}\nWHY:\n- " + "\n- ".join(why[:3]) + "\n"
 
     msg += "\n📉 SHORTS\n"
-
-    for t, s, why in shorts[:5]:
-        msg += f"\n{t}: {int(s)}\nWHY:\n- " + "\n- ".join(why[:3]) + "\n"
+    if not shorts:
+        msg += "No strong short setups\n"
+    else:
+        for t, s, why in shorts[:5]:
+            msg += f"\n{t}: {int(s)}\nWHY:\n- " + "\n- ".join(why[:3]) + "\n"
 
     await interaction.followup.send(msg)
 
+# =========================
+# MODE COMMAND
+# =========================
 
 @bot.tree.command(name="mode", description="Set mode", guild=discord.Object(id=GUILD_ID))
 async def mode_cmd(interaction, mode: str):
@@ -332,7 +319,6 @@ async def mode_cmd(interaction, mode: str):
 
     user_modes[interaction.user.id] = mode
     await interaction.response.send_message(f"Mode → {mode}")
-
 
 # =========================
 # START
